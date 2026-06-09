@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-wanani-sqr"
+version = "2.5.1"
+description = "WanAnimate-focused segment queue runner for long video workflows."
+authors = [{name = "FeiHou"}]
+license = "MIT"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/zere111ai/ComfyUI-WanAni-SQR"
+
+[tool.comfy]
+PublisherId = "fx-feihou"
+DisplayName = "ComfyUI-WanAni-SQR"
