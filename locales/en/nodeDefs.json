@@ -1,7 +1,7 @@
 {
   "SegmentQueueRunner": {
-    "display_name": "Segment Queue Runner 🎬",
-    "description": "Split a video workflow into queued segments with preview and resume support.",
+    "display_name": "WanAni SQR",
+    "description": "Queue long WanAnimate workflows by segment, with preview, resume, reference switching, merging, and optional transitions.",
     "inputs": {
       "frame_rate": {
         "name": "Frame Rate",
@@ -9,11 +9,11 @@
       },
       "total_frames": {
         "name": "Total Frames",
-        "tooltip": "Total number of frames in the reference video. Connect this to the frame_count output of Load Video."
+        "tooltip": "Total reference video frame count. Connect this to the frame_count output of Load Video."
       },
       "segment_count": {
-        "name": "Segment Count",
-        "tooltip": "Number of evenly divided segments. The maximum can be adjusted in settings."
+        "name": "Segments",
+        "tooltip": "Number of equal segments. The maximum can be adjusted in Settings."
       },
       "start_segment": {
         "name": "Start Segment",
@@ -25,7 +25,7 @@
       },
       "enable_resume": {
         "name": "Enable Resume",
-        "tooltip": "When enabled, use the selected video above as the transition source for the first segment."
+        "tooltip": "When enabled, use the selected video as the transition source for the first segment."
       },
       "reference_video_node_id": {
         "name": "Reference Video Node ID"

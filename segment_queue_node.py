@@ -1223,7 +1223,7 @@ class SegmentQueueRunner:
 
 
 NODE_CLASS_MAPPINGS        = {"SegmentQueueRunner": SegmentQueueRunner}
-NODE_DISPLAY_NAME_MAPPINGS = {"SegmentQueueRunner": "分段队列 🎬 @肥猴🐵 @wuwu🚂 @雪子❄️ "}
+NODE_DISPLAY_NAME_MAPPINGS = {"SegmentQueueRunner": "WanAni SQR"}
 
 
 # ── 后端 API ─────────────────────────────────────────────────────

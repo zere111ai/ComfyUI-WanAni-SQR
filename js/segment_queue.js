@@ -7,15 +7,15 @@ function sqrThumbUrl(path) {
     return THUMB_URL + encodeURIComponent(path) + sep + "_ts=" + Date.now() + "_r=" + Math.random().toString(36).slice(2, 8);
 }
 
-// ── 远程环境检测 ──────────────────────────────────────────────────
+// ── Remote environment detection ─────────────────────────────────
 function _sqrIsRemote() {
     const h = window.location.hostname;
     return h !== "localhost" && h !== "127.0.0.1" && h !== "::1";
 }
 
 /**
- * 远程环境：用浏览器原生文件选择框选图片，上传到服务器 input/ 目录。
- * 返回 Promise<string[]>  已保存的文件名列表（相对 input/ 的名称）
+ * Remote mode: select images with the browser file picker and upload them to input/.
+ * Returns Promise<string[]> of saved names relative to input/.
  */
 function _sqrPickAndUploadImages() {
     return new Promise((resolve) => {
@@ -29,18 +29,18 @@ function _sqrPickAndUploadImages() {
             document.body.removeChild(inp);
             const files = [...inp.files];
             if (!files.length) { resolve([]); return; }
-            const prog = _sqrUploadProgressUI(`正在上传 ${files.length} 张图片…`);
+            const prog = _sqrUploadProgressUI(`Uploading ${files.length} image(s)...`);
             try {
                 const fd = new FormData();
                 files.forEach(f => fd.append("files[]", f, f.name));
                 const resp = await fetch("/sqr/upload_images", { method: "POST", body: fd });
                 const data = await resp.json();
                 prog.remove();
-                if (data.error) { alert(`上传出错：${data.error}`); resolve([]); return; }
+                if (data.error) { alert(`Upload error: ${data.error}`); resolve([]); return; }
                 resolve(data.saved || []);
             } catch (e) {
                 prog.remove();
-                alert(`上传失败：${e.message}`);
+                alert(`Upload failed: ${e.message}`);
                 resolve([]);
             }
         };
@@ -50,8 +50,8 @@ function _sqrPickAndUploadImages() {
 }
 
 /**
- * 远程环境：用浏览器原生文件选择框选视频，上传到服务器 input/ 目录。
- * 返回 Promise<string>  已保存的文件名（或 ""）
+ * Remote mode: select a video with the browser file picker and upload it to input/.
+ * Returns Promise<string> of the saved name, or "".
  */
 function _sqrPickAndUploadVideo() {
     return new Promise((resolve) => {
@@ -65,18 +65,18 @@ function _sqrPickAndUploadVideo() {
             document.body.removeChild(inp);
             const file = inp.files[0];
             if (!file) { resolve(""); return; }
-            const prog = _sqrUploadProgressUI(`正在上传视频：${file.name}（${(file.size / 1024 / 1024).toFixed(1)} MB）…`);
+            const prog = _sqrUploadProgressUI(`Uploading video: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)...`);
             try {
                 const fd = new FormData();
                 fd.append("file", file, file.name);
                 const resp = await fetch("/sqr/upload_video", { method: "POST", body: fd });
                 const data = await resp.json();
                 prog.remove();
-                if (data.error) { alert(`上传出错：${data.error}`); resolve(""); return; }
+                if (data.error) { alert(`Upload error: ${data.error}`); resolve(""); return; }
                 resolve(data.saved || "");
             } catch (e) {
                 prog.remove();
-                alert(`上传失败：${e.message}`);
+                alert(`Upload failed: ${e.message}`);
                 resolve("");
             }
         };
@@ -85,7 +85,7 @@ function _sqrPickAndUploadVideo() {
     });
 }
 
-/** 上传中的全屏遮罩提示 */
+/** Full-screen upload progress overlay. */
 function _sqrUploadProgressUI(msg) {
     if (!document.getElementById("sqr-spin-style")) {
         const st = document.createElement("style");
@@ -125,7 +125,7 @@ function _sqrCollectUpstream(nodeId, promptOutput, visited) {
 }
 
 
-// ── 节点ID设置弹窗 ────────────────────────────────────────────────
+// ── Node ID setup dialog ─────────────────────────────────────────
 function showNodeIdSelector(fields, onConfirm) {
     document.getElementById("sqr-nodeid-overlay")?.remove();
     const overlay=document.createElement("div");
@@ -139,8 +139,8 @@ function showNodeIdSelector(fields, onConfirm) {
         display:"flex",flexDirection:"column",gap:"12px",
         boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
     const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
-    box.appendChild(mkDiv("🔧  设置节点 ID","font-size:14px;font-weight:600;"));
-    box.appendChild(mkDiv("节点 ID 可通过 ComfyUI → 设置 → 画面 → 节点 → 标签 → 显示全部 开启显示","font-size:11px;opacity:.5;line-height:1.5;"));
+    box.appendChild(mkDiv("Node IDs","font-size:14px;font-weight:600;"));
+    box.appendChild(mkDiv("Enable node ID labels in ComfyUI settings if the IDs are hidden.","font-size:11px;opacity:.5;line-height:1.5;"));
 
     const inputs={};
     fields.forEach(({key,label,tooltip,value})=>{
@@ -152,7 +152,7 @@ function showNodeIdSelector(fields, onConfirm) {
         const inp=document.createElement("input");
         inp.type="text"; inp.value=value||"";
         inp.style.cssText="flex:1;padding:5px 8px;border-radius:5px;border:1px solid var(--border-color,#555);background:var(--comfy-input-bg,#333);color:var(--input-text,#eee);font-size:12px;";
-        inp.placeholder="填入节点 ID 数字";
+        inp.placeholder="Node ID";
         inputs[key]=inp; row.append(lbl,inp); box.appendChild(row);
     });
 
@@ -160,8 +160,8 @@ function showNodeIdSelector(fields, onConfirm) {
     const mkBtn=(t,s,fn)=>{const b=Object.assign(document.createElement("button"),{textContent:t});
         b.style.cssText=`flex:1;padding:6px 18px;border-radius:6px;cursor:pointer;${s}`;b.onclick=fn;return b;};
     btns.append(
-        mkBtn("取消","",()=>overlay.remove()),
-        mkBtn("✓ 确认","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{
+        mkBtn("Cancel","",()=>overlay.remove()),
+        mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{
             const result={};
             fields.forEach(({key})=>{result[key]=inputs[key]?.value||"";});
             onConfirm(result); overlay.remove();
@@ -205,8 +205,8 @@ return new Promise(resolve => {
         boxShadow:"0 8px 40px rgba(0,0,0,.7)"
     });
     const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
-    box.appendChild(mkDiv("📂  续跑合并：选择中断前已有素材","font-size:14px;font-weight:700;"));
-    box.appendChild(mkDiv("点击视频文件添加到下方列表，可拖动排序，右键移除。最终将按此顺序拼接为完整成品。","font-size:11px;opacity:.6;"));
+    box.appendChild(mkDiv("Resume Merge: Select Existing Clips","font-size:14px;font-weight:700;"));
+    box.appendChild(mkDiv("Click videos to add them below. Drag to reorder, right-click to remove. The final video will be merged in this order.","font-size:11px;opacity:.6;"));
 
     const pathBar = document.createElement("div");
     Object.assign(pathBar.style, {
@@ -226,7 +226,7 @@ return new Promise(resolve => {
     function renderSel() {
         selArea.innerHTML = "";
         if (!selPaths.length) {
-            selArea.appendChild(mkDiv("（未选，续跑结果将单独合并）","opacity:.35;font-size:11px;padding:4px;"));
+            selArea.appendChild(mkDiv("(None selected; the resumed result will be merged separately)","opacity:.35;font-size:11px;padding:4px;"));
             return;
         }
         selPaths.forEach((p, i) => {
@@ -247,11 +247,11 @@ return new Promise(resolve => {
     const browserWrap = document.createElement("div");
     Object.assign(browserWrap.style, { display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(90px,1fr))",gap:"6px",border:"1px solid var(--border-color,#444)",borderRadius:"8px",padding:"8px",maxHeight:"300px",overflowY:"auto",minHeight:"80px",alignContent:"flex-start" });
     box.appendChild(browserWrap);
-    box.appendChild(mkDiv("已选素材（拖动排序，右键移除）：","font-size:11px;opacity:.5;margin-top:2px;"));
+    box.appendChild(mkDiv("Selected clips: drag to reorder, right-click to remove","font-size:11px;opacity:.5;margin-top:2px;"));
     box.appendChild(selArea); renderSel();
 
     async function loadDir(path) {
-        browserWrap.innerHTML = '<div style="opacity:.5;font-size:12px;padding:8px;grid-column:1/-1;">加载中...</div>'; pathBar.innerHTML = "";
+        browserWrap.innerHTML = '<div style="opacity:.5;font-size:12px;padding:8px;grid-column:1/-1;">Loading...</div>'; pathBar.innerHTML = "";
         try {
             const url = path ? `/sqr/browse_videos?path=${encodeURIComponent(path)}` : "/sqr/browse_videos";
             const data = await (await fetch(url)).json();
@@ -261,24 +261,24 @@ return new Promise(resolve => {
             browserWrap.innerHTML = ""; browserWrap.style.display = "grid";
             if (data.type === "roots") { data.roots.forEach(({label,path:p,is_drive})=>{ const icon = (p === "__drives__" || is_drive) ? "🖥" : "📁"; const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML=`<span>${icon}</span><span>${label}</span>`; row.onclick=()=>loadDir(p); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); });
             } else {
-                if (data.parent) { const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML="<span>📁</span><span>.. （上级目录）</span>"; row.onclick=()=>loadDir(data.parent); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); }
+                if (data.parent) { const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML="<span>📁</span><span>.. Parent folder</span>"; row.onclick=()=>loadDir(data.parent); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); }
                 data.folders.forEach(f=>{ const fp=(data.path.endsWith("/")||data.path.endsWith("\\"))?data.path+f:data.path+"/"+f; const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML=`<span>📁</span><span>${f}</span>`; row.onclick=()=>loadDir(fp); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); });
-                if (!data.videos.length && !data.folders.length) { browserWrap.appendChild(mkDiv("（此目录没有视频文件和子文件夹）","opacity:.4;font-size:12px;padding:8px;grid-column:1/-1;")); } else if (!data.videos.length) { browserWrap.appendChild(mkDiv("（此目录没有视频文件，可进入子文件夹）","opacity:.4;font-size:12px;padding:4px;grid-column:1/-1;")); }
+                if (!data.videos.length && !data.folders.length) { browserWrap.appendChild(mkDiv("(No video files or folders here)","opacity:.4;font-size:12px;padding:8px;grid-column:1/-1;")); } else if (!data.videos.length) { browserWrap.appendChild(mkDiv("(No videos here; open a folder)","opacity:.4;font-size:12px;padding:4px;grid-column:1/-1;")); }
                 data.videos.forEach(f=>{ const fp=(data.path.endsWith("/")||data.path.endsWith("\\"))?data.path+f:data.path+"/"+f; const alreadySel = selPaths.includes(fp);
                     const card=document.createElement("div"); Object.assign(card.style,{ cursor:"pointer",border: alreadySel?"2px solid #4a6":"1px solid var(--border-color,#555)",borderRadius:"6px",padding:"6px 8px",background:"var(--comfy-input-bg,#2a2a2a)",display:"flex",flexDirection:"row",alignItems:"center",gap:"8px",fontSize:"11px",opacity: alreadySel?"0.55":"1",gridColumn:"1/-1" });
                     const img=document.createElement("img"); img.src=`/sqr/video_thumb?file=${encodeURIComponent(fp)}`; img.style.cssText="width:72px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;"; img.draggable=false; img.onerror=()=>{img.style.display="none";};
                     const nmWrap=document.createElement("div"); nmWrap.style.cssText="flex:1;overflow:hidden;"; const nm=mkDiv(f,"font-size:11px;opacity:.9;word-break:break-word;overflow-wrap:anywhere;line-height:1.4;"); nm.title=fp; nmWrap.appendChild(nm); card.append(img,nmWrap);
                     card.onclick=()=>{ if (!selPaths.includes(fp)) { selPaths.push(fp); card.style.border="2px solid #4a6"; card.style.opacity="0.55"; } renderSel(); }; browserWrap.appendChild(card); });
             }
-        } catch(e) { browserWrap.innerHTML=`<div style="opacity:.5;font-size:12px;padding:8px;grid-column:1/-1;">加载失败：${e.message}</div>`; }
+        } catch(e) { browserWrap.innerHTML=`<div style="opacity:.5;font-size:12px;padding:8px;grid-column:1/-1;">Failed to load: ${e.message}</div>`; }
     }
 
     const btns=document.createElement("div"); btns.style.cssText="display:flex;gap:8px;margin-top:4px;";
     const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
     btns.append(
-        mkBtn("⊗ 关闭续跑","background:rgba(180,60,60,0.2);border:1px solid rgba(200,80,80,0.5);color:#f88;",()=>{ sqrNode._sqrClearVideo?.(); overlay.remove(); resolve({ cancelResume: true }); }),
-        mkBtn("🚫 跳过，只合并本次","",()=>{ overlay.remove(); resolve([]); }),
-        mkBtn("✅ 确认并运行","background:#2a9;color:#fff;border:none;font-weight:700;",()=>{ overlay.remove(); resolve(selPaths); })
+        mkBtn("Disable Resume","background:rgba(180,60,60,0.2);border:1px solid rgba(200,80,80,0.5);color:#f88;",()=>{ sqrNode._sqrClearVideo?.(); overlay.remove(); resolve({ cancelResume: true }); }),
+        mkBtn("Skip, Merge Current Only","",()=>{ overlay.remove(); resolve([]); }),
+        mkBtn("Run","background:#2a9;color:#fff;border:none;font-weight:700;",()=>{ overlay.remove(); resolve(selPaths); })
     );
     const _xBtn2=document.createElement("button");_xBtn2.textContent="×";_xBtn2.style.cssText="position:absolute;top:10px;right:12px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--input-text,#aaa);line-height:1;padding:0;";_xBtn2.onclick=()=>{overlay.remove();resolve(null);};
     box.style.position="relative"; box.appendChild(_xBtn2); box.appendChild(btns); overlay.appendChild(box); document.body.appendChild(overlay);
@@ -299,17 +299,17 @@ function _showLogOverlay(nodeId) {
     Object.assign(hdr.style, { padding:"7px 12px",display:"flex",alignItems:"center",gap:"8px",borderBottom:"1px solid var(--border-color,#2a2a2a)",background:"rgba(255,255,255,0.03)",cursor:"move",flexShrink:"0",fontSize:"12px",fontWeight:"600",userSelect:"none" });
     let dx=0,dy=0,dragging=false;
     hdr.onmousedown=e=>{dragging=true;const r=box.getBoundingClientRect();dx=e.clientX-r.left;dy=e.clientY-r.top;document.onmousemove=e2=>{if(!dragging)return;box.style.left=(e2.clientX-dx)+"px";box.style.top=(e2.clientY-dy)+"px";box.style.right="auto";box.style.bottom="auto";};document.onmouseup=()=>{dragging=false;document.onmousemove=null;document.onmouseup=null;};};
-    hdr.appendChild(Object.assign(document.createElement("span"),{textContent:"📋  分段队列 · 运行日志"}));
-    const dot=Object.assign(document.createElement("span"),{title:"实时更新中"});dot.style.cssText="width:6px;height:6px;border-radius:50%;background:#2a9;flex-shrink:0;";hdr.appendChild(dot);
+    hdr.appendChild(Object.assign(document.createElement("span"),{textContent:"WanAni SQR Log"}));
+    const dot=Object.assign(document.createElement("span"),{title:"Live updates"});dot.style.cssText="width:6px;height:6px;border-radius:50%;background:#2a9;flex-shrink:0;";hdr.appendChild(dot);
     hdr.appendChild(Object.assign(document.createElement("span"),{style:"flex:1"}));
-    const clrBtn=document.createElement("button");clrBtn.textContent="清空";clrBtn.title="清空当前日志";clrBtn.style.cssText="padding:2px 9px;border-radius:4px;cursor:pointer;font-size:11px;background:rgba(255,255,255,0.07);border:1px solid var(--border-color,#444);color:var(--input-text,#aaa);";hdr.appendChild(clrBtn);
+    const clrBtn=document.createElement("button");clrBtn.textContent="Clear";clrBtn.title="Clear current log";clrBtn.style.cssText="padding:2px 9px;border-radius:4px;cursor:pointer;font-size:11px;background:rgba(255,255,255,0.07);border:1px solid var(--border-color,#444);color:var(--input-text,#aaa);";hdr.appendChild(clrBtn);
     const xBtn=document.createElement("button");xBtn.textContent="×";xBtn.style.cssText="padding:0 8px;font-size:18px;line-height:1.4;background:none;border:none;cursor:pointer;color:var(--input-text,#666);";xBtn.onmouseover=()=>xBtn.style.color="#fff";xBtn.onmouseout=()=>xBtn.style.color="var(--input-text,#666)";xBtn.onclick=e=>{e.stopPropagation();box.remove();};hdr.appendChild(xBtn);box.appendChild(hdr);
-    const area=document.createElement("div");Object.assign(area.style,{flex:"1",overflowY:"auto",padding:"8px 12px",fontSize:"11px",lineHeight:"1.8",fontFamily:"'Consolas','Courier New',monospace",color:"var(--input-text,#bbb)",whiteSpace:"pre-wrap",wordBreak:"break-word",overflowWrap:"anywhere"});area.innerHTML="<div style='opacity:.4;'>加载中...</div>";box.appendChild(area);document.body.appendChild(box);
+    const area=document.createElement("div");Object.assign(area.style,{flex:"1",overflowY:"auto",padding:"8px 12px",fontSize:"11px",lineHeight:"1.8",fontFamily:"'Consolas','Courier New',monospace",color:"var(--input-text,#bbb)",whiteSpace:"pre-wrap",wordBreak:"break-word",overflowWrap:"anywhere"});area.innerHTML="<div style='opacity:.4;'>Loading...</div>";box.appendChild(area);document.body.appendChild(box);
     function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
     function lineHtml(r){const s=esc(r);if(/===/.test(r))return`<div style="color:#7cf;font-weight:700;padding-top:3px;">${s}</div>`;if(/---.*段.*---/.test(r))return`<div style="color:#adf;border-top:1px solid #222;margin-top:3px;padding-top:3px;">${s}</div>`;if(/✓/.test(r))return`<div style="color:#5d9;">${s}</div>`;if(/✗/.test(r))return`<div style="color:#f76;">${s}</div>`;if(/⚠/.test(r))return`<div style="color:#fa8;">${s}</div>`;if(/预览模式|全新生成|续跑模式|重新设计续跑模式/.test(r))return`<div style="color:#fd9;font-weight:600;">${s}</div>`;if(String(r).trim()==="")return`<div style="height:6px;"></div>`;return`<div>${s}</div>`;}
-    function render(lines){if(!lines||!lines.length){area.innerHTML="<div style='opacity:.4;'>（暂无日志）</div>";return;}const atBot=area.scrollHeight-area.scrollTop-area.clientHeight<50;const html=[];for(const raw of lines){const parts=String(raw).split(/\r?\n/);for(const r of parts)html.push(lineHtml(r));}area.innerHTML=html.join("");if(atBot)area.scrollTop=area.scrollHeight;}
+    function render(lines){if(!lines||!lines.length){area.innerHTML="<div style='opacity:.4;'>(No logs yet)</div>";return;}const atBot=area.scrollHeight-area.scrollTop-area.clientHeight<50;const html=[];for(const raw of lines){const parts=String(raw).split(/\r?\n/);for(const r of parts)html.push(lineHtml(r));}area.innerHTML=html.join("");if(atBot)area.scrollTop=area.scrollHeight;}
     let lastSig="";
-    clrBtn.onclick=e=>{e.stopPropagation();fetch(`/sqr/logs/clear?uid=${nodeId}`,{method:"POST"}).catch(()=>{});area.innerHTML="<div style='opacity:.4;'>（已清空）</div>";lastSig="";};
+    clrBtn.onclick=e=>{e.stopPropagation();fetch(`/sqr/logs/clear?uid=${nodeId}`,{method:"POST"}).catch(()=>{});area.innerHTML="<div style='opacity:.4;'>(Cleared)</div>";lastSig="";};
     async function poll(){if(!document.getElementById(pid))return;try{dot.style.opacity=".35";const d=await(await fetch(`/sqr/logs?uid=${nodeId}`)).json();dot.style.opacity="1";const logs=Array.isArray(d.logs)?d.logs:[];const sig=JSON.stringify(logs);if(sig!==lastSig){lastSig=sig;render(logs);}}catch(e){dot.style.opacity=".15";}if(document.getElementById(pid))setTimeout(poll,2000);}
     poll();
 }
@@ -376,6 +376,7 @@ app.registerExtension({
             const r = origCreated ? origCreated.apply(this, arguments) : undefined;
             const node = this;
             const getW = name => node.widgets?.find(w => w.name === name);
+            if (node.size) node.size[0] = Math.max(node.size[0] || 0, 380);
 
             const sqrKeys = ["参考图节点ID","参考视频节点ID","输出节点ID","动作嵌入节点ID","分段参考图","续跑视频路径"];
             const resumeToggle = getW("启用续跑");
@@ -406,27 +407,8 @@ app.registerExtension({
             }
 
             if (transitionW) {
-                transitionW.draw = function(ctx, nodeRef, w, y, H) {
-                    const on = !!this.value;
-                    ctx.fillStyle = on ? "rgba(255,150,60,0.34)" : "rgba(255,255,255,0.05)";
-                    ctx.beginPath();
-                    ctx.roundRect ? ctx.roundRect(4, y+2, w-8, H-4, 4) : ctx.rect(4, y+2, w-8, H-4);
-                    ctx.fill();
-                    if (on) { ctx.strokeStyle = "rgba(255,180,80,0.75)"; ctx.lineWidth = 1; ctx.stroke(); }
-                    ctx.fillStyle = on ? "#ffd08a" : "rgba(190,190,190,0.6)";
-                    ctx.font = "12px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                    ctx.fillText(on ? "过渡效果 ON" : "过渡效果 OFF", w / 2, y + H / 2);
-                    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-                };
-                transitionW.mouse = function(event, pos, nodeRef) {
-                    if (event.type === "pointerdown" || event.type === "mousedown") {
-                        this.value = !this.value;
-                        nodeRef.setDirtyCanvas?.(true, true);
-                        if (this.callback) this.callback(this.value);
-                        return true;
-                    }
-                    return false;
-                };
+                transitionW.computeSize = () => [0, -4];
+                transitionW.draw = () => {};
             }
 
             function _sqrApplySegMax() {
@@ -497,28 +479,8 @@ app.registerExtension({
 
             const execW = getW("执行");
             if (execW) {
-                execW.draw = function(ctx, nodeRef, w, y, H) {
-                    const isExec = !!this.value;
-                    ctx.fillStyle = isExec ? "rgba(40,160,100,0.35)" : "rgba(255,255,255,0.05)";
-                    ctx.beginPath();
-                    ctx.roundRect ? ctx.roundRect(4, y+2, w-8, H-4, 4) : ctx.rect(4, y+2, w-8, H-4);
-                    ctx.fill();
-                    if (isExec) { ctx.strokeStyle = "rgba(60,200,130,0.7)"; ctx.lineWidth = 1; ctx.stroke(); }
-                    const label = isExec ? "🚀  执行模式" : "👁️  预览模式";
-                    ctx.fillStyle = isExec ? "#7fffb0" : "rgba(190,190,190,0.5)";
-                    ctx.font = "12px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                    ctx.fillText(label, w / 2, y + H / 2);
-                    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-                };
-                execW.mouse = function(event, pos, node) {
-                    if (event.type === "pointerdown" || event.type === "mousedown") {
-                        this.value = !this.value;
-                        node.setDirtyCanvas?.(true, true);
-                        if (this.callback) this.callback(this.value);
-                        return true;
-                    }
-                    return false;
-                };
+                execW.computeSize = () => [0, -4];
+                execW.draw = () => {};
             }
 
             const _origDrawBg = node.onDrawBackground;
@@ -540,8 +502,8 @@ app.registerExtension({
                 ctx.restore();
             };
 
-            // ── ⚙ 设置按钮 ──
-            const settingsBtn = node.addWidget("button", "⚙️  设置", null, () => {
+            // ── Settings dialog ──
+            const settingsBtn = node.addWidget("button", "Settings", null, () => {
                 document.getElementById("sqr-settings-overlay")?.remove();
                 const s = node._sqrSettings;
                 const overlay = document.createElement("div");
@@ -558,36 +520,36 @@ app.registerExtension({
                     boxShadow:"0 8px 40px rgba(0,0,0,.7)"
                 });
                 const mkDiv=(t,st)=>Object.assign(document.createElement("div"),{textContent:t,style:st||""});
-                box.appendChild(mkDiv("⚙️  分段队列 · 设置","font-size:15px;font-weight:700;"));
+                box.appendChild(mkDiv("WanAni SQR Settings","font-size:15px;font-weight:700;"));
                 const mkRemoteHint = (text) => {
                     const el = document.createElement("div");
                     Object.assign(el.style, { padding:"10px 14px", borderRadius:"8px", fontSize:"12px", lineHeight:"1.7", border:"1px solid rgba(100,180,255,0.3)", background:"rgba(60,140,255,0.08)", color:"var(--input-text,#ccc)" });
-                    el.innerHTML = `<span style="color:#7cf;font-weight:600;">🌐 远程模式</span>&nbsp; ${text}`;
+                    el.innerHTML = `<span style="color:#7cf;font-weight:600;">Remote mode</span>&nbsp; ${text}`;
                     return el;
                 };
 
                 const isRemote = _sqrIsRemote();
 
                 box.appendChild(Object.assign(document.createElement("div"),{style:"border-top:1px solid var(--border-color,#444);"}));
-                box.appendChild(mkDiv("平均分段设置","font-size:13px;font-weight:600;margin-bottom:2px;"));
-                box.appendChild(mkDiv("仅保留平均分段模式，分段数语义固定为“段数”。","font-size:10px;opacity:.45;line-height:1.5;margin-bottom:6px;"));
+                box.appendChild(mkDiv("Segment Controls","font-size:13px;font-weight:600;margin-bottom:2px;"));
+                box.appendChild(mkDiv("The segment slider always means the number of equal segments.","font-size:10px;opacity:.45;line-height:1.5;margin-bottom:6px;"));
 
                 if (!isRemote) {
                     const segMaxSection = document.createElement("div");
                     segMaxSection.style.cssText = "display:flex;align-items:center;gap:10px;margin-top:4px;";
-                    const segMaxLabel = document.createElement("span"); segMaxLabel.textContent = "分段数滑动条最大值"; segMaxLabel.style.cssText = "font-size:12px;opacity:.7;";
+                    const segMaxLabel = document.createElement("span"); segMaxLabel.textContent = "Segment slider max"; segMaxLabel.style.cssText = "font-size:12px;opacity:.7;";
                     const segMaxInput = document.createElement("input"); segMaxInput.type = "number"; segMaxInput.min = "2"; segMaxInput.max = "100"; segMaxInput.value = String(s.segMax || 10);
                     Object.assign(segMaxInput.style, { width:"70px", padding:"5px 8px", borderRadius:"5px", border:"1px solid var(--border-color,#555)", background:"var(--comfy-input-bg,#333)", color:"var(--input-text,#eee)", fontSize:"13px" });
                     segMaxInput.onchange = () => { let v = parseInt(segMaxInput.value) || 10; v = Math.max(2, Math.min(100, v)); segMaxInput.value = v; s.segMax = v; };
-                    const segMaxHint = document.createElement("span"); segMaxHint.textContent = "（2-100，默认10）"; segMaxHint.style.cssText = "font-size:11px;opacity:.4;";
+                    const segMaxHint = document.createElement("span"); segMaxHint.textContent = "(2-100, default 10)"; segMaxHint.style.cssText = "font-size:11px;opacity:.4;";
                     segMaxSection.append(segMaxLabel, segMaxInput, segMaxHint);
                     box.appendChild(segMaxSection);
                 } else {
-                    box.appendChild(mkDiv(`当前分段最大值：${s.segMax}`,"font-size:12px;opacity:.7;padding:4px 0;"));
+                    box.appendChild(mkDiv(`Current segment max: ${s.segMax}`,"font-size:12px;opacity:.7;padding:4px 0;"));
                 }
 
                 box.appendChild(Object.assign(document.createElement("div"),{style:"border-top:1px solid var(--border-color,#444);"}));
-                box.appendChild(mkDiv("执行模式时节点边缘高亮","font-size:11px;opacity:.5;margin-bottom:2px;"));
+                box.appendChild(mkDiv("Node glow while Execute is ON","font-size:11px;opacity:.5;margin-bottom:2px;"));
                 if (!isRemote) {
                     const glowRow = document.createElement("div"); glowRow.style.cssText = "display:flex;gap:10px;";
                     const mkGlowOpt = (value, label, desc) => {
@@ -599,28 +561,28 @@ app.registerExtension({
                         d.onclick = () => { s.execGlow = value; glowRow.querySelectorAll("div[data-glowval]").forEach(x => { const me = x.dataset.glowval === String(value); x.style.border = me ? "2px solid #4a9" : "2px solid var(--border-color,#555)"; x.style.background = me ? "rgba(60,180,120,0.12)" : "transparent"; }); };
                         return d;
                     };
-                    glowRow.append(mkGlowOpt(true, "✅ True", "执行模式时节点边缘绿色发光"), mkGlowOpt(false, "🚫 False", "不显示边缘高亮"));
+                    glowRow.append(mkGlowOpt(true, "True", "Show green node glow while executing"), mkGlowOpt(false, "False", "Do not show node glow"));
                     box.appendChild(glowRow);
                 } else {
-                    box.appendChild(mkDiv(`当前：${s.execGlow ? "开启" : "关闭"}`,"font-size:12px;opacity:.7;padding:4px 0;"));
+                    box.appendChild(mkDiv(`Current: ${s.execGlow ? "On" : "Off"}`,"font-size:12px;opacity:.7;padding:4px 0;"));
                 }
                 box.appendChild(Object.assign(document.createElement("div"),{style:"border-top:1px solid var(--border-color,#444);"}));
                 box.appendChild(mkDiv("Save png of first frame for metadata","font-size:11px;opacity:.5;margin-bottom:2px;"));
                 if (isRemote) {
                     const pngW = getW("sqr_save_png"); if (pngW) pngW.value = "false";
-                    box.appendChild(mkRemoteHint("固定为<b style='color:#aef;'>不保存 png</b>，远程环境下自动清理元数据图片以节省空间。"));
+                    box.appendChild(mkRemoteHint("Locked to <b style='color:#aef;'>do not save PNG</b>. Metadata images are cleaned in remote mode."));
                 } else {
                     const pngRow = document.createElement("div"); pngRow.style.cssText="display:flex;gap:10px;";
                     const mkPngOpt = (value, label, desc) => { const d = document.createElement("div"); const active = (s.savePng === value); Object.assign(d.style, { flex:"1", padding:"8px 12px", minHeight:"68px", boxSizing:"border-box", borderRadius:"8px", cursor:"pointer", border: active ? "2px solid #4a9" : "2px solid var(--border-color,#555)", background: active ? "rgba(60,180,120,0.12)" : "transparent" }); d.innerHTML = `<div style="font-size:13px;font-weight:600;">${label}</div><div style="font-size:11px;opacity:.5;margin-top:2px;">${desc}</div>`; d.dataset.pngval = String(value); d.onclick = () => { s.savePng = value; pngRow.querySelectorAll("div[data-pngval]").forEach(x => { const me = x.dataset.pngval === String(value); x.style.border = me ? "2px solid #4a9" : "2px solid var(--border-color,#555)"; x.style.background = me ? "rgba(60,180,120,0.12)" : "transparent"; }); }; return d; };
-                    pngRow.append(mkPngOpt(true,"✅ True","保存 png"),mkPngOpt(false,"🚫 False","不保存 png（自动清理）"));
+                    pngRow.append(mkPngOpt(true,"True","Save PNG"),mkPngOpt(false,"False","Do not save PNG; clean automatically"));
                     box.appendChild(pngRow);
                 }
 
                 const btns=document.createElement("div"); btns.style.cssText="display:flex;gap:8px;margin-top:4px;";
                 const mkBtn=(t,st,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${st}`;b.onclick=fn;return b;};
                 btns.append(
-                    mkBtn("取消","",()=>overlay.remove()),
-                    mkBtn("✓ 确认","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{
+                    mkBtn("Cancel","",()=>overlay.remove()),
+                    mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{
                         if (!isRemote) {
                             localStorage.setItem(_SQR_PNG_KEY, String(s.savePng));
                             localStorage.setItem(_SQR_SEGMAX_KEY, String(s.segMax));
@@ -647,13 +609,15 @@ app.registerExtension({
                 document.body.appendChild(overlay);
             });
             settingsBtn.serialize = false;
+            settingsBtn.computeSize = () => [0, -4];
+            settingsBtn.draw = () => {};
 
-            // ── 🔧 设置节点 ID 按钮 ──
-            const nodeIdBtn = node.addWidget("button", "🔧  设置节点 ID", null, () => {
+            // ── Node ID dialog ──
+            const nodeIdBtn = node.addWidget("button", "Node IDs", null, () => {
                 showNodeIdSelector([
-                    {key:"参考图节点ID",   label:"参考图 LoadImage ID",        tooltip:"LoadImage node ID",              value:getSqr("参考图节点ID")},
-                    {key:"参考视频节点ID", label:"参考视频 Load Video ID",      tooltip:"Load Video (target) node ID",    value:getSqr("参考视频节点ID")},
-                    {key:"输出节点ID",     label:"输出 VHS_VideoCombine ID",    tooltip:"Main output VHS_VideoCombine ID",value:getSqr("输出节点ID")},
+                    {key:"参考图节点ID",   label:"Reference Image LoadImage ID", tooltip:"LoadImage node ID",              value:getSqr("参考图节点ID")},
+                    {key:"参考视频节点ID", label:"Reference Video Load Video ID", tooltip:"Load Video target node ID",      value:getSqr("参考视频节点ID")},
+                    {key:"输出节点ID",     label:"Output VHS_VideoCombine ID",   tooltip:"Main output VHS_VideoCombine ID",value:getSqr("输出节点ID")},
                     {key:"动作嵌入节点ID", label:"WanVideoAnimateEmbeds ID",    tooltip:"WanVideoAnimateEmbeds node ID",  value:getSqr("动作嵌入节点ID")},
                 ], result=>{
                     Object.entries(result).forEach(([k,v]) => setSqr(k, v));
@@ -661,9 +625,86 @@ app.registerExtension({
                 });
             });
             nodeIdBtn.serialize = false;
+            nodeIdBtn.computeSize = () => [0, -4];
+            nodeIdBtn.draw = () => {};
 
-            // ── 📋 查看日志按钮 ──
-            const logBtn = node.addWidget("button", "📋  查看日志", null, () => {
+            const _sqrTopHit = {};
+            function _sqrDrawTopButton(ctx, key, x, y, w, h, label, active, opts={}) {
+                _sqrTopHit[key] = { x, y: opts.hitY ?? y, w, h };
+                const onColor = opts.onColor || "rgba(34,170,105,0.86)";
+                const offColor = opts.offColor || "rgba(195,64,72,0.86)";
+                const neutral = opts.neutral || "rgba(255,255,255,0.09)";
+                ctx.save();
+                ctx.fillStyle = opts.mode === "action" ? neutral : (active ? onColor : offColor);
+                ctx.strokeStyle = opts.mode === "action" ? "rgba(255,255,255,0.22)" : (active ? "rgba(120,255,180,0.75)" : "rgba(255,150,150,0.75)");
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.roundRect ? ctx.roundRect(x, y, w, h, 6) : ctx.rect(x, y, w, h);
+                ctx.fill();
+                ctx.stroke();
+                ctx.fillStyle = opts.textColor || "#f4f4f4";
+                ctx.font = "bold 10px sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(label, x + w / 2, y + h / 2 + 0.5);
+                ctx.restore();
+            }
+
+            const topBarWidget = {
+                name: "_sqr_topbar",
+                type: "sqr_topbar",
+                serialize: false,
+                computeSize(width) { return [width, 30]; },
+                draw(ctx, nodeRef, width, y) {
+                    const h = 22;
+                    const topY = y + 4;
+                    const gap = 5;
+                    const actionW = 58;
+                    const idsW = 58;
+                    const rightX = width - actionW - idsW - gap - 7;
+                    _sqrDrawTopButton(ctx, "settings", rightX, topY, actionW, h, "Settings", false, { mode: "action", hitY: 4 });
+                    _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
+
+                    const toggleW = Math.max(76, Math.min(102, (width - actionW - idsW - 36) / 2));
+                    const totalW = toggleW * 2 + gap;
+                    const midX = Math.max(7, Math.min((width - totalW) / 2, rightX - totalW - 8));
+                    const transOn = !!transitionW?.value;
+                    const execOn = !!execW?.value;
+                    _sqrDrawTopButton(ctx, "transition", midX, topY, toggleW, h, transOn ? "Transition ON" : "Transition OFF", transOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "execute", midX + toggleW + gap, topY, toggleW, h, execOn ? "Execute Mode" : "Preview Mode", execOn, { hitY: 4 });
+                },
+                mouse(event, pos, nodeRef) {
+                    if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
+                    const x = pos?.[0], y = pos?.[1];
+                    for (const [key, r] of Object.entries(_sqrTopHit)) {
+                        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+                            if (key === "transition" && transitionW) {
+                                transitionW.value = !transitionW.value;
+                                transitionW.callback?.(transitionW.value);
+                            } else if (key === "execute" && execW) {
+                                execW.value = !execW.value;
+                                execW.callback?.(execW.value);
+                            } else if (key === "settings") {
+                                settingsBtn.callback?.();
+                            } else if (key === "nodeids") {
+                                nodeIdBtn.callback?.();
+                            }
+                            nodeRef.setDirtyCanvas?.(true, true);
+                            return true;
+                        }
+                    }
+                    return false;
+                },
+            };
+            node.addCustomWidget(topBarWidget);
+            const _topIdx = node.widgets.indexOf(topBarWidget);
+            if (_topIdx > 0) {
+                node.widgets.splice(_topIdx, 1);
+                node.widgets.unshift(topBarWidget);
+            }
+
+            // ── Log button ──
+            const logBtn = node.addWidget("button", "View Log", null, () => {
                 _showLogOverlay(String(node.id));
             });
             logBtn.serialize = false;
@@ -681,26 +722,26 @@ app.registerExtension({
                 ctx.textAlign="left";ctx.textBaseline="alphabetic";
             };
 
-            // ── 已选视频管理弹窗 ──
+            // ── Resume video manager ──
             const showVideoManager = (onConfirm) => {
                 document.getElementById("sqr-vidmgr-overlay")?.remove();
                 let curPath = getSqr("续跑视频路径") || "";
                 const overlay = document.createElement("div");overlay.id = "sqr-vidmgr-overlay";Object.assign(overlay.style, {position:"fixed",inset:"0",zIndex:"10001",background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center"});
                 const box = document.createElement("div");Object.assign(box.style, {background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#444)",borderRadius:"12px",padding:"18px 22px",width:"480px",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
                 const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
-                box.appendChild(mkDiv("🎬  已选续跑视频","font-size:14px;font-weight:600;"));
-                box.appendChild(mkDiv("右键可移除已选视频（移除后恢复普通模式）","font-size:11px;opacity:.5;"));
+                box.appendChild(mkDiv("Selected Resume Video","font-size:14px;font-weight:600;"));
+                box.appendChild(mkDiv("Right-click to remove the selected video and return to normal mode.","font-size:11px;opacity:.5;"));
                 const vidArea = document.createElement("div");Object.assign(vidArea.style,{padding:"10px",border:"1px solid var(--border-color,#444)",borderRadius:"8px",minHeight:"52px"});
                 function renderVid() {
                     vidArea.innerHTML = "";
-                    if (!curPath) { vidArea.appendChild(mkDiv("（未选择续跑视频，将以普通模式运行）","opacity:.4;font-size:12px;padding:4px;")); } else {
+                    if (!curPath) { vidArea.appendChild(mkDiv("(No resume video selected; normal mode will be used)","opacity:.4;font-size:12px;padding:4px;")); } else {
                         const fname = curPath.split(/[/\\]/).pop(); const row = document.createElement("div"); Object.assign(row.style, {display:"flex",alignItems:"center",gap:"8px",padding:"8px 10px",borderRadius:"6px",background:"rgba(60,180,120,0.12)",border:"1px solid #4a9",cursor:"default"});
-                        row.innerHTML = `<span style="font-size:18px">🎬</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#6df;">${fname}</span><span style="opacity:.35;font-size:10px;flex-shrink:0;">右键移除</span>`;
+                        row.innerHTML = `<span style="font-size:18px">🎬</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#6df;">${fname}</span><span style="opacity:.35;font-size:10px;flex-shrink:0;">Right-click to remove</span>`;
                         row.title = curPath; row.oncontextmenu = e => { e.preventDefault(); curPath = ""; renderVid(); }; vidArea.appendChild(row); } }
                 renderVid(); box.appendChild(vidArea);
                 const btns = document.createElement("div"); btns.style.cssText="display:flex;gap:8px;";
                 const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
-                btns.append(mkBtn("⊗ 关闭续跑","background:rgba(180,60,60,0.2);border:1px solid rgba(200,80,80,0.5);color:#f88;",()=>{onConfirm("");overlay.remove();}),mkBtn("取消","",()=>overlay.remove()),mkBtn("✓ 确认","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{onConfirm(curPath);overlay.remove();}));
+                btns.append(mkBtn("Disable Resume","background:rgba(180,60,60,0.2);border:1px solid rgba(200,80,80,0.5);color:#f88;",()=>{onConfirm("");overlay.remove();}),mkBtn("Cancel","",()=>overlay.remove()),mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{onConfirm(curPath);overlay.remove();}));
                 box.appendChild(btns);
                 const _xBtn=document.createElement("button");_xBtn.textContent="×";_xBtn.style.cssText="position:absolute;top:10px;right:12px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--input-text,#aaa);line-height:1;padding:0;";_xBtn.onmouseover=()=>_xBtn.style.color="#fff";_xBtn.onmouseout=()=>_xBtn.style.color="var(--input-text,#aaa)";_xBtn.onclick=()=>overlay.remove();box.style.position="relative";box.appendChild(_xBtn);overlay.appendChild(box);overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};document.body.appendChild(overlay);
             };
@@ -724,13 +765,13 @@ app.registerExtension({
                     const fromW = getW("从第几段开始");
                     if (seg <= maxSeg) {
                         if (fromW) fromW.value = seg;
-                        resumeBtn.name = `🎬  ${dispName}  ← 第${seg}段开始`;
+                        resumeBtn.name = `Resume: ${dispName}  ← start at segment ${seg}`;
                     } else {
-                        resumeBtn.name = `🎬  ${dispName}  ← 请手动设置从第几段开始`;
+                        resumeBtn.name = `Resume: ${dispName}  ← set start segment manually`;
                     }
                     setTimeout(() => { resumeBtn.name = `🎬  ${dispName}`; node.setDirtyCanvas?.(true,true); }, 3000);
                 } else {
-                    resumeBtn.name = `🎬  ${dispName}`;
+                    resumeBtn.name = `Resume: ${dispName}`;
                 }
                 node.setDirtyCanvas?.(true, true);
                 resumeBtn._sqrActive = true;
@@ -738,18 +779,18 @@ app.registerExtension({
             };
 
             const _resumeNative = async () => {
-                // 统一走浏览器弹框（避免本地 tkinter 在部分环境下弹不出来）
+                // Use the browser dialog consistently across local and remote environments.
                 try {
                     const saved = await _sqrPickAndUploadVideo();
                     if (saved) _applyVideo(saved);
                     showVideoManager(result => { if (result) _applyVideo(result); else _clearVideo(); });
-                } catch(e) { console.warn("[SQR] 续跑选择失败:", e); }
+                } catch(e) { console.warn("[SQR] Resume selection failed:", e); }
             };
             const _resumeSelectDirect = () => {
                 _resumeNative();
             };
 
-            const resumeBtn = node.addWidget("button", "🎬  选择续跑视频", null, async () => {
+            const resumeBtn = node.addWidget("button", "Select Resume Video", null, async () => {
                 if (_sqrIsRemote()) { _resumeSelectDirect(); return; }
                 const uid = String(node.id);
                 let ckpt = null;
@@ -785,10 +826,10 @@ app.registerExtension({
                 const fromW2 = getW("从第几段开始");
                 if (fromW2) fromW2.value = 1;
                 const foW = getW("sqr_frame_offset"); if (foW) foW.value = -1;
-                resumeBtn.name = "🎬  已清除，从第1段开始";
+                resumeBtn.name = "Cleared; start from segment 1";
                 node.setDirtyCanvas?.(true, true);
                 setTimeout(() => {
-                    resumeBtn.name = "🎬  选择续跑视频";
+                    resumeBtn.name = "Select Resume Video";
                     node.setDirtyCanvas?.(true, true);
                 }, 3000);
             };
@@ -801,7 +842,7 @@ app.registerExtension({
             }
             { const w = getW("sqr_frame_offset"); if (w) w.value = -1; }
 
-            // ── 已选图片管理弹窗 ──
+            // ── Reference image manager ──
             const showRefManager = (onConfirm) => {
                 document.getElementById("sqr-mgr-overlay")?.remove();
                 const paths = (getSqr("分段参考图")||"").split(",").map(s=>s.trim()).filter(Boolean);
@@ -809,12 +850,12 @@ app.registerExtension({
                 const overlay = document.createElement("div");overlay.id = "sqr-mgr-overlay";Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"10001",background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center"});
                 const box = document.createElement("div");Object.assign(box.style,{background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#444)",borderRadius:"12px",padding:"18px 22px",width:"680px",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
                 const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
-                box.appendChild(mkDiv("🖼  管理已选参考图（左键复制 · 拖动排序 · 右键移除）","font-size:14px;font-weight:600;"));
+                box.appendChild(mkDiv("Reference Images","font-size:14px;font-weight:600;"));
                 const grid = document.createElement("div");Object.assign(grid.style,{display:"flex",flexWrap:"wrap",gap:"8px",minHeight:"80px",maxHeight:"420px",overflowY:"auto",padding:"10px",border:"1px solid var(--border-color,#444)",borderRadius:"8px"});
                 function renderGrid() {
                     grid.innerHTML = "";
-                    if (!paths.length) { grid.appendChild(mkDiv("（尚未选择参考图）","opacity:.4;font-size:13px;padding:8px;")); return; }
-                    grid.appendChild(mkDiv("左键单击复制  ·  拖动调整顺序  ·  右键移除","font-size:11px;opacity:.5;width:100%;padding:2px 4px;"));
+                    if (!paths.length) { grid.appendChild(mkDiv("(No reference images selected)","opacity:.4;font-size:13px;padding:8px;")); return; }
+                    grid.appendChild(mkDiv("Left-click to duplicate · drag to reorder · right-click to remove","font-size:11px;opacity:.5;width:100%;padding:2px 4px;"));
                     paths.forEach((p, idx) => {
                         const fname = p.split(/[/\\]/).pop();
                         const cell = document.createElement("div");Object.assign(cell.style,{width:"100px",textAlign:"center",position:"relative",border:"2px solid var(--border-color,#555)",borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none"});cell.draggable = true;
@@ -832,20 +873,20 @@ app.registerExtension({
                 renderGrid(); box.appendChild(grid);
                 const btns = document.createElement("div"); btns.style.cssText="display:flex;gap:8px;";
                 const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
-                btns.append(mkBtn("取消","",()=>overlay.remove()),mkBtn("✓ 确认","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{onConfirm(paths);overlay.remove();}));
+                btns.append(mkBtn("Cancel","",()=>overlay.remove()),mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{onConfirm(paths);overlay.remove();}));
                 box.appendChild(btns);
                 const _xBtn=document.createElement("button");_xBtn.textContent="×";_xBtn.style.cssText="position:absolute;top:10px;right:12px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--input-text,#aaa);line-height:1;padding:0;";_xBtn.onmouseover=()=>_xBtn.style.color="#fff";_xBtn.onmouseout=()=>_xBtn.style.color="var(--input-text,#aaa)";_xBtn.onclick=()=>overlay.remove();box.style.position="relative";box.appendChild(_xBtn);overlay.appendChild(box);overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};document.body.appendChild(overlay);
             };
 
             const _refNative = async () => {
-                // 统一走浏览器弹框（避免本地 tkinter 在部分环境下弹不出来）
+                // Use the browser dialog consistently across local and remote environments.
                 try {
                     const saved = await _sqrPickAndUploadImages();
                     if (saved.length) { const cur = (getSqr("分段参考图")||"").split(",").map(s=>s.trim()).filter(Boolean); saved.forEach(name => { if (!cur.includes(name)) cur.push(name); }); setSqr("分段参考图", cur.join(",")); refThumbWidget.syncPaths(); }
                     showRefManager(result => { setSqr("分段参考图", result.join(",")); refThumbWidget.syncPaths(); node.setDirtyCanvas?.(true, true); });
-                } catch(e) { console.warn("[SQR] 参考图选择失败:", e); }
+                } catch(e) { console.warn("[SQR] Reference image selection failed:", e); }
             };
-            const refBtn = node.addWidget("button", "🖼️  选择参考图", null, () => {
+            const refBtn = node.addWidget("button", "Select Reference Images", null, () => {
                 _refNative();
             });
             refBtn.serialize = false;
@@ -901,7 +942,7 @@ app.registerExtension({
                     let _dn2 = fname;
                     while (_dn2.length > 2 && _tc2.measureText(_dn2 + "…").width > _availPx2) { _dn2 = _dn2.slice(0, -1); }
                     if (_dn2 !== fname) _dn2 = _dn2.slice(0, -1) + "…";
-                    resumeBtn.name = "🎬  " + _dn2;
+                    resumeBtn.name = "Resume: " + _dn2;
                     resumeBtn._sqrActive = true;
                 }
                 node.setDirtyCanvas?.(true, true);
@@ -933,7 +974,7 @@ app.registerExtension({
 
             function _showCheckpointBanner(ckpt) {
                 if (node._sqrCheckpointBanner) return; node._sqrCheckpointBanner = true;
-                const bannerBtn = node.addWidget("button", `⚠  上次第${ckpt.completed_seg}/${ckpt.total_segs}段中断 → 点击选择续跑方式`, null, () => _showResumeDialog(ckpt, bannerBtn));
+                const bannerBtn = node.addWidget("button", `Interrupted at segment ${ckpt.completed_seg}/${ckpt.total_segs}; choose resume mode`, null, () => _showResumeDialog(ckpt, bannerBtn));
                 bannerBtn.serialize = false;
                 bannerBtn.draw = function(ctx, node, widget_width, y, H) {
                     ctx.fillStyle = this._hover ? "rgba(255,160,0,0.45)" : "rgba(255,160,0,0.28)";
@@ -950,21 +991,21 @@ app.registerExtension({
                 document.getElementById("sqr-ckpt-overlay")?.remove();
                 const curSeg = Number(getW("分段数")?.value ?? ckpt.segments); const segChanged = curSeg !== Number(ckpt.segments);
                 const lvBad = ckpt.ref_video_match === false; const ckptParams = ckpt.ref_video_params || {};
-                const mNames = { video:"参考视频文件", force_rate:"强制帧率", frame_load_cap:"帧数读取上限", skip_first_frames:"跳过前X帧", select_every_nth:"间隔" };
+                const mNames = { video:"reference video", force_rate:"force rate", frame_load_cap:"frame load cap", skip_first_frames:"skip first frames", select_every_nth:"select every nth" };
                 const lvStr = (ckpt.ref_video_mismatches||[]).map(k=>mNames[k]||k).join("、");
 
                 const overlay = document.createElement("div");overlay.id = "sqr-ckpt-overlay";Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"10000",background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center"});
                 const box = document.createElement("div");Object.assign(box.style,{background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"2px solid rgba(255,160,0,0.6)",borderRadius:"12px",padding:"20px 24px",width:"500px",maxHeight:"90vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)",position:"relative"});
                 const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
 
-                box.appendChild(mkDiv("⚠  检测到上次中断 — 选择续跑方式","font-size:15px;font-weight:700;color:#ffcc00;"));
+                box.appendChild(mkDiv("Interrupted Run Detected","font-size:15px;font-weight:700;color:#ffcc00;"));
                 const infoDiv = document.createElement("div");infoDiv.style.cssText="font-size:12px;background:rgba(255,255,255,0.05);padding:8px 10px;border-radius:6px;line-height:1.9;";
-                infoDiv.innerHTML = `上次完成：第 ${ckpt.completed_seg} / ${ckpt.total_segs} 段 &nbsp;·&nbsp; 平均分段数：<span style="color:#6df">${ckpt.segments}</span> &nbsp;·&nbsp; 续跑视频：<span style="color:#6df">${ckpt.transition_video}</span> &nbsp;·&nbsp; 时间：${ckpt.timestamp}`;
+                infoDiv.innerHTML = `Completed: segment ${ckpt.completed_seg} / ${ckpt.total_segs} &nbsp;·&nbsp; Segments: <span style="color:#6df">${ckpt.segments}</span> &nbsp;·&nbsp; Resume video: <span style="color:#6df">${ckpt.transition_video}</span> &nbsp;·&nbsp; Time: ${ckpt.timestamp}`;
                 box.appendChild(infoDiv);
 
                 const warns = [];
-                if (segChanged) warns.push(`分段数已从 ${ckpt.segments} 改为 ${curSeg}（自动续跑将恢复为 ${ckpt.segments} 段）`);
-                if (lvBad) warns.push(`Load Video 参数已修改（${lvStr}）（自动续跑将恢复原参数）`);
+                if (segChanged) warns.push(`Segment count changed from ${ckpt.segments} to ${curSeg}; auto resume will restore ${ckpt.segments}.`);
+                if (lvBad) warns.push(`Load Video settings changed (${lvStr}); auto resume will restore the original values.`);
                 if (warns.length) { const w = document.createElement("div"); w.style.cssText="font-size:12px;color:#ffaa44;padding:6px 10px;border:1px solid rgba(255,160,0,0.35);border-radius:6px;display:flex;flex-direction:column;gap:3px;"; warns.forEach(t => w.appendChild(mkDiv(`⚠ ${t}`))); box.appendChild(w); }
 
                 const applyAndClose = (mode, opts={}) => {
@@ -974,7 +1015,7 @@ app.registerExtension({
                     const foW = getW("sqr_frame_offset"); if (foW) foW.value = fo;
                     setSqr("续跑视频路径", ckpt.transition_video);
                     const rtw = getW("启用续跑"); if (rtw) rtw.value = true;
-                    resumeBtn._sqrActive = true; resumeBtn.name = "🎬  " + ckpt.transition_video;
+                    resumeBtn._sqrActive = true; resumeBtn.name = "Resume: " + ckpt.transition_video;
                     const fromW = getW("从第几段开始"); const segWw = getW("分段数");
                     if (mode === "auto") {
                         _sqrEnsureSegCapacity(ckpt.segments);
@@ -1005,33 +1046,33 @@ app.registerExtension({
                     return card;
                 };
 
-                box.appendChild(mkCard("⊗","关闭续跑","不衔接，全新生成一份","rgba(200,80,80,0.7)",()=>{_clearVideo();overlay.remove();}));
-                const autoHints = []; if (segChanged) autoHints.push(`恢复分段数为 ${ckpt.segments} 段`); if (lvBad) autoHints.push("恢复 Load Video 参数");
-                const autoHint = autoHints.length ? `推荐 · 将自动${autoHints.join("、")}` : "推荐 · 一键套用，参考图可随时自行修改";
-                box.appendChild(mkCard("✅","自动续跑",autoHint,"rgba(30,170,130,0.8)",()=>applyAndClose("auto")));
+                box.appendChild(mkCard("×","Disable Resume","Start fresh without stitching to the previous run.","rgba(200,80,80,0.7)",()=>{_clearVideo();overlay.remove();}));
+                const autoHints = []; if (segChanged) autoHints.push(`restore ${ckpt.segments} segments`); if (lvBad) autoHints.push("restore Load Video settings");
+                const autoHint = autoHints.length ? `Recommended · Will ${autoHints.join(", ")}` : "Recommended · Apply the checkpoint, then adjust references if needed.";
+                box.appendChild(mkCard("✓","Auto Resume",autoHint,"rgba(30,170,130,0.8)",()=>applyAndClose("auto")));
 
                 let newRefs = [];
                 const redesignBody = document.createElement("div");redesignBody.style.cssText="padding:6px 14px 12px;border-top:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;gap:8px;";
                 const segRow=document.createElement("div");segRow.style.cssText="display:flex;align-items:center;gap:8px;";
-                segRow.appendChild(mkDiv("续跑部分分段数：","font-size:12px;flex-shrink:0;"));
+                segRow.appendChild(mkDiv("Remaining segment count:","font-size:12px;flex-shrink:0;"));
                 const segInp=document.createElement("input");segInp.type="number";segInp.min="1";segInp.max="100";
                 segInp.value=String(getW("分段数")?.value??ckpt.segments);
                 Object.assign(segInp.style,{width:"60px",padding:"4px 8px",borderRadius:"5px",fontSize:"13px",background:"var(--comfy-input-bg,#333)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#555)"});
                 segRow.appendChild(segInp);redesignBody.appendChild(segRow);
                 const refRow=document.createElement("div");refRow.style.cssText="display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
-                refRow.appendChild(mkDiv("续跑参考图：","font-size:12px;flex-shrink:0;"));
-                const refInfo=mkDiv("（未选，使用当前节点设置）","font-size:11px;opacity:.5;");
-                const refPickBtn=document.createElement("button");refPickBtn.textContent="🖼  选择";refPickBtn.style.cssText="padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px;";
+                refRow.appendChild(mkDiv("Resume reference images:","font-size:12px;flex-shrink:0;"));
+                const refInfo=mkDiv("(None selected; use current node settings)","font-size:11px;opacity:.5;");
+                const refPickBtn=document.createElement("button");refPickBtn.textContent="Select";refPickBtn.style.cssText="padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px;";
                 refPickBtn.onclick=async()=>{
-                    // 统一走浏览器弹框
-                    try { const saved = await _sqrPickAndUploadImages(); if (saved.length) { newRefs = saved; refInfo.textContent=`已选 ${newRefs.length} 张`; refInfo.style.opacity="1"; } } catch(e) {}
+                    // Use the browser dialog consistently across local and remote environments.
+                    try { const saved = await _sqrPickAndUploadImages(); if (saved.length) { newRefs = saved; refInfo.textContent=`${newRefs.length} selected`; refInfo.style.opacity="1"; } } catch(e) {}
                 };
                 refRow.append(refPickBtn,refInfo);redesignBody.appendChild(refRow);
-                const confirmRD=document.createElement("button");confirmRD.textContent="✅ 确认重新设计续跑";confirmRD.style.cssText="flex:1;padding:8px 14px;border-radius:7px;cursor:pointer;font-size:13px;background:#2a9;color:#fff;border:none;font-weight:600;margin-top:2px;";
+                const confirmRD=document.createElement("button");confirmRD.textContent="Apply Redesigned Resume";confirmRD.style.cssText="flex:1;padding:8px 14px;border-radius:7px;cursor:pointer;font-size:13px;background:#2a9;color:#fff;border:none;font-weight:600;margin-top:2px;";
                 confirmRD.onclick=()=>applyAndClose("redesign",{newSegCount:Math.max(1,parseInt(segInp.value)||1),newRefs:newRefs.length?newRefs:null});
                 redesignBody.appendChild(confirmRD);
-                box.appendChild(mkCard("🔧","重新设计续跑","自定义剩余分段数和参考图（进阶）","rgba(200,150,30,0.8)", null, redesignBody));
-                box.appendChild(mkCard("📁","手动续跑","自选视频文件，不使用 checkpoint 引导","rgba(120,120,120,0.7)", ()=>{ overlay.remove(); _resumeSelectDirect(); }));
+                box.appendChild(mkCard("Edit","Redesign Resume","Customize remaining segment count and reference images.","rgba(200,150,30,0.8)", null, redesignBody));
+                box.appendChild(mkCard("File","Manual Resume","Choose a video file without checkpoint guidance.","rgba(120,120,120,0.7)", ()=>{ overlay.remove(); _resumeSelectDirect(); }));
 
                 const _xBtn=document.createElement("button");_xBtn.textContent="×";_xBtn.style.cssText="position:absolute;top:10px;right:12px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--input-text,#aaa);line-height:1;padding:0;";_xBtn.onmouseover=()=>_xBtn.style.color="#fff";_xBtn.onmouseout=()=>_xBtn.style.color="var(--input-text,#aaa)";_xBtn.onclick=()=>overlay.remove();
                 box.appendChild(_xBtn);overlay.appendChild(box);overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};document.body.appendChild(overlay);
