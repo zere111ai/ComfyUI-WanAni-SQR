@@ -380,10 +380,19 @@ app.registerExtension({
 
             const sqrKeys = ["参考图节点ID","参考视频节点ID","输出节点ID","动作嵌入节点ID","分段参考图","续跑视频路径"];
             const resumeToggle = getW("启用续跑");
-            if (resumeToggle) { resumeToggle.computeSize = () => [0, -4]; resumeToggle.type = "hidden"; }
+            const hideInternalWidget = (w) => {
+                if (!w) return;
+                w.computeSize = () => [0, 0];
+                w.draw = () => {};
+                w.mouse = () => false;
+                w.type = "hidden";
+                w.hidden = true;
+                w.options = Object.assign({}, w.options || {}, { hidden: true });
+            };
+            hideInternalWidget(resumeToggle);
             sqrKeys.forEach(k => {
                 const w = getW(k);
-                if (w) { w.computeSize = () => [0, -4]; w.type = "hidden"; }
+                hideInternalWidget(w);
             });
             {
                 const _spw = getW("sqr_save_png");
@@ -618,7 +627,7 @@ app.registerExtension({
                     {key:"参考图节点ID",   label:"Reference Image LoadImage ID", tooltip:"LoadImage node ID",              value:getSqr("参考图节点ID")},
                     {key:"参考视频节点ID", label:"Reference Video Load Video ID", tooltip:"Load Video target node ID",      value:getSqr("参考视频节点ID")},
                     {key:"输出节点ID",     label:"Output VHS_VideoCombine ID",   tooltip:"Main output VHS_VideoCombine ID",value:getSqr("输出节点ID")},
-                    {key:"动作嵌入节点ID", label:"WanVideoAnimateEmbeds ID",    tooltip:"WanVideoAnimateEmbeds node ID",  value:getSqr("动作嵌入节点ID")},
+                    {key:"动作嵌入节点ID", label:"SQR WanAnimate Transition ID", tooltip:"SQR WanAnimate Transition node ID", value:getSqr("动作嵌入节点ID")},
                 ], result=>{
                     Object.entries(result).forEach(([k,v]) => setSqr(k, v));
                     node.setDirtyCanvas?.(true, true);
@@ -630,7 +639,7 @@ app.registerExtension({
 
             const _sqrTopHit = {};
             function _sqrDrawTopButton(ctx, key, x, y, w, h, label, active, opts={}) {
-                _sqrTopHit[key] = { x, y: opts.hitY ?? y, w, h };
+                _sqrTopHit[key] = { x, y, localY: opts.hitY ?? y, w, h };
                 const onColor = opts.onColor || "rgba(34,170,105,0.86)";
                 const offColor = opts.offColor || "rgba(195,64,72,0.86)";
                 const neutral = opts.neutral || "rgba(255,255,255,0.09)";
@@ -659,13 +668,15 @@ app.registerExtension({
                     const h = 22;
                     const topY = y + 4;
                     const gap = 5;
-                    const actionW = 58;
+                    const actionW = 54;
                     const idsW = 58;
-                    const rightX = width - actionW - idsW - gap - 7;
+                    const logW = 42;
+                    const rightX = width - actionW - idsW - logW - gap * 2 - 7;
                     _sqrDrawTopButton(ctx, "settings", rightX, topY, actionW, h, "Settings", false, { mode: "action", hitY: 4 });
                     _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
+                    _sqrDrawTopButton(ctx, "log", rightX + actionW + idsW + gap * 2, topY, logW, h, "Log", false, { mode: "action", hitY: 4 });
 
-                    const toggleW = Math.max(76, Math.min(102, (width - actionW - idsW - 36) / 2));
+                    const toggleW = Math.max(76, Math.min(102, (width - actionW - idsW - logW - 42) / 2));
                     const totalW = toggleW * 2 + gap;
                     const midX = Math.max(7, Math.min((width - totalW) / 2, rightX - totalW - 8));
                     const transOn = !!transitionW?.value;
@@ -677,7 +688,9 @@ app.registerExtension({
                     if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
                     const x = pos?.[0], y = pos?.[1];
                     for (const [key, r] of Object.entries(_sqrTopHit)) {
-                        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+                        const hitWidgetLocal = x >= r.x && x <= r.x + r.w && y >= r.localY && y <= r.localY + r.h;
+                        const hitNodeLocal = x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+                        if (hitWidgetLocal || hitNodeLocal) {
                             if (key === "transition" && transitionW) {
                                 transitionW.value = !transitionW.value;
                                 transitionW.callback?.(transitionW.value);
@@ -688,6 +701,8 @@ app.registerExtension({
                                 settingsBtn.callback?.();
                             } else if (key === "nodeids") {
                                 nodeIdBtn.callback?.();
+                            } else if (key === "log") {
+                                _showLogOverlay(String(nodeRef.id));
                             }
                             nodeRef.setDirtyCanvas?.(true, true);
                             return true;
@@ -708,19 +723,8 @@ app.registerExtension({
                 _showLogOverlay(String(node.id));
             });
             logBtn.serialize = false;
-            logBtn.draw = function(ctx, node, widget_width, y, H) {
-                const on = !!document.getElementById(`sqr-log-${node.id}`);
-                ctx.fillStyle = on ? "rgba(40,160,100,0.35)" : "rgba(255,255,255,0.05)";
-                ctx.beginPath();
-                if(ctx.roundRect) ctx.roundRect(4,y+2,widget_width-8,H-4,4);
-                else ctx.rect(4,y+2,widget_width-8,H-4);
-                ctx.fill();
-                if(on){ctx.strokeStyle="rgba(60,200,130,0.7)";ctx.lineWidth=1;ctx.stroke();}
-                ctx.fillStyle = on ? "#7fffb0" : "rgba(190,190,190,0.5)";
-                ctx.font="12px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
-                ctx.fillText(this.name,widget_width/2,y+H/2);
-                ctx.textAlign="left";ctx.textBaseline="alphabetic";
-            };
+            logBtn.computeSize = () => [0, -4];
+            logBtn.draw = () => {};
 
             // ── Resume video manager ──
             const showVideoManager = (onConfirm) => {
@@ -750,14 +754,6 @@ app.registerExtension({
                 if (!result) return;
                 setSqr("续跑视频路径", result);
                 const fname = result.split(/[/\\]/).pop();
-                const _availPx = Math.max(40, (node.size?.[0] || 200) - 62);
-                const _tc = document.createElement("canvas").getContext("2d");
-                _tc.font = "13px sans-serif";
-                let dispName = fname;
-                while (dispName.length > 2 && _tc.measureText(dispName + "…").width > _availPx) {
-                    dispName = dispName.slice(0, -1);
-                }
-                if (dispName !== fname) dispName = dispName.slice(0, -1) + "…";
                 const m = fname.match(/sqr_trans_[0-9_]+_seg(\d+)\.mp4$/i) || fname.match(/sqr_trans_[a-f0-9]+_seg(\d+)\.mp4$/i) || fname.match(/segment_transition_seg(\d+)\.mp4$/i);
                 if (m) {
                     const seg = parseInt(m[1]) + 1;
@@ -765,13 +761,13 @@ app.registerExtension({
                     const fromW = getW("从第几段开始");
                     if (seg <= maxSeg) {
                         if (fromW) fromW.value = seg;
-                        resumeBtn.name = `Resume: ${dispName}  ← start at segment ${seg}`;
+                        resumeBtn.name = "Manage Resume Video";
                     } else {
-                        resumeBtn.name = `Resume: ${dispName}  ← set start segment manually`;
+                        resumeBtn.name = "Manage Resume Video";
                     }
-                    setTimeout(() => { resumeBtn.name = `🎬  ${dispName}`; node.setDirtyCanvas?.(true,true); }, 3000);
+                    setTimeout(() => { resumeBtn.name = "Manage Resume Video"; node.setDirtyCanvas?.(true,true); }, 3000);
                 } else {
-                    resumeBtn.name = `Resume: ${dispName}`;
+                    resumeBtn.name = "Manage Resume Video";
                 }
                 node.setDirtyCanvas?.(true, true);
                 resumeBtn._sqrActive = true;
@@ -808,6 +804,7 @@ app.registerExtension({
             resumeBtn.serialize = false;
             resumeBtn.draw = function(ctx, node, widget_width, y, H) {
                 const active = !!this._sqrActive;
+                const label = active ? "Manage Resume Video" : "Select Resume Video";
                 ctx.fillStyle = active ? "rgba(40,160,100,0.35)" : "rgba(255,255,255,0.05)";
                 ctx.beginPath();
                 ctx.roundRect ? ctx.roundRect(4, y+2, widget_width-8, H-4, 4) : ctx.rect(4, y+2, widget_width-8, H-4);
@@ -815,9 +812,52 @@ app.registerExtension({
                 if (active) { ctx.strokeStyle = "rgba(60,200,130,0.7)"; ctx.lineWidth = 1; ctx.stroke(); }
                 ctx.fillStyle = active ? "#7fffb0" : "rgba(190,190,190,0.5)";
                 ctx.font = "12px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                ctx.fillText(this.name, widget_width/2, y + H/2);
+                ctx.fillText(label, widget_width/2, y + H/2);
                 ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
             };
+
+            const resumePathWidget = {
+                name: "_sqr_resume_path",
+                type: "sqr_resume_path",
+                serialize: false,
+                computeSize(width) {
+                    return getSqr("续跑视频路径") ? [width, 34] : [width, 0];
+                },
+                draw(ctx, nodeRef, widget_width, y) {
+                    const path = getSqr("续跑视频路径");
+                    if (!path) return;
+                    const pad = 8;
+                    const boxX = 4, boxY = y + 2, boxW = widget_width - 8, boxH = 30;
+                    ctx.save();
+                    ctx.fillStyle = "rgba(60,180,120,0.09)";
+                    ctx.strokeStyle = "rgba(70,190,130,0.38)";
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.roundRect ? ctx.roundRect(boxX, boxY, boxW, boxH, 5) : ctx.rect(boxX, boxY, boxW, boxH);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.font = "bold 9px sans-serif";
+                    ctx.fillStyle = "rgba(165,255,205,0.86)";
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "top";
+                    ctx.fillText("Resume Video Path", boxX + pad, boxY + 4);
+
+                    let text = path;
+                    ctx.font = "10px sans-serif";
+                    const maxW = boxW - pad * 2;
+                    if (ctx.measureText(text).width > maxW) {
+                        const tail = path.split(/[/\\]/).pop() || path;
+                        text = tail;
+                        while (text.length > 3 && ctx.measureText("..." + text).width > maxW) text = text.slice(1);
+                        text = "..." + text;
+                    }
+                    ctx.fillStyle = "rgba(220,245,255,0.78)";
+                    ctx.fillText(text, boxX + pad, boxY + 17);
+                    ctx.restore();
+                },
+            };
+            node.addCustomWidget(resumePathWidget);
 
             const _clearVideo = () => {
                 setSqr("续跑视频路径", "");
@@ -826,7 +866,7 @@ app.registerExtension({
                 const fromW2 = getW("从第几段开始");
                 if (fromW2) fromW2.value = 1;
                 const foW = getW("sqr_frame_offset"); if (foW) foW.value = -1;
-                resumeBtn.name = "Cleared; start from segment 1";
+                resumeBtn.name = "Select Resume Video";
                 node.setDirtyCanvas?.(true, true);
                 setTimeout(() => {
                     resumeBtn.name = "Select Resume Video";
@@ -861,13 +901,16 @@ app.registerExtension({
                         const cell = document.createElement("div");Object.assign(cell.style,{width:"100px",textAlign:"center",position:"relative",border:"2px solid var(--border-color,#555)",borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none"});cell.draggable = true;
                         const badge = mkDiv(String(idx+1),"position:absolute;top:2px;left:2px;background:#3a9;color:#fff;border-radius:3px;padding:0 4px;font-size:10px;font-weight:bold;line-height:16px;z-index:1;");
                         const img = new Image();img.src = sqrThumbUrl(p);Object.assign(img.style,{width:"92px",height:"92px",objectFit:"contain",display:"block",borderRadius:"4px",pointerEvents:"none"});
+                        const res = mkDiv("loading","font-size:9px;margin-top:2px;color:#8fd;opacity:.72;");
+                        img.onload = () => { res.textContent = `${img.naturalWidth}x${img.naturalHeight}`; };
+                        img.onerror = () => { res.textContent = "unknown"; };
                         const lbl = mkDiv(fname.length>14?fname.slice(0,13)+"…":fname,"font-size:9px;margin-top:3px;word-break:break-all;opacity:.7;");lbl.title = p;
                         cell.ondragstart=e=>{e.stopPropagation();dragIdx=idx;cell._sqrDragged=false;setTimeout(()=>cell.style.opacity=".35",0);};cell.ondragend=e=>{e.stopPropagation();cell.style.opacity="1";setTimeout(()=>{cell._sqrDragged=false;},0);};
                         cell.ondragover=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="#4a9";};cell.ondragleave=()=>{cell.style.borderColor="var(--border-color,#555)";};
                         cell.ondrop=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="var(--border-color,#555)";cell._sqrDragged=true;if(dragIdx!==null&&dragIdx!==idx){const[m]=paths.splice(dragIdx,1);paths.splice(idx,0,m);renderGrid();}};
                         cell.onclick=e=>{e.stopPropagation();if(cell._sqrDragged){cell._sqrDragged=false;return;} paths.splice(idx+1,0,p);renderGrid();};
                         cell.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();paths.splice(idx,1);renderGrid();};
-                        cell.append(badge,img,lbl);grid.appendChild(cell);
+                        cell.append(badge,img,res,lbl);grid.appendChild(cell);
                     });
                 }
                 renderGrid(); box.appendChild(grid);
@@ -905,7 +948,7 @@ app.registerExtension({
                 _minH() { return 20 + 16; },
                 _getHeaderH(node) { let h = LiteGraph.NODE_TITLE_HEIGHT ?? 26; for (const w of (node.widgets || [])) { if (w === this) break; const sz = w.computeSize ? w.computeSize(node.size[0]) : [0, LiteGraph.NODE_WIDGET_HEIGHT ?? 20]; h += (sz[1] ?? 20) + 4; } return h; },
                 _getAvailH(node, width) { const headerH = this._getHeaderH(node); const totalH = node.size[1] || 300; return Math.max(this._minH(), totalH - headerH - 8); },
-                _calcLayout(width, availH) { const n = this._paths.length; if (!n) return { rows: 0, cols: 0, slot: 48, n }; const gap = 6, pad = 8; const MIN_SLOT = 20, MAX_SLOT = 800; const aW = width - pad * 2; const aH = availH - 16; let bestSlot = MIN_SLOT, bestRows = 1, bestCols = n; for (let r = 1; r <= n; r++) { const c = Math.ceil(n / r); const slotByW = Math.floor((aW - gap*(c-1)) / c); const slotByH = Math.floor((aH - gap*(r-1)) / r); const slot = Math.min(slotByW, slotByH, MAX_SLOT); if (slot >= MIN_SLOT && slot > bestSlot) { bestSlot = slot; bestRows = r; bestCols = c; } } return { rows: bestRows, cols: bestCols, slot: bestSlot, n }; },
+                _calcLayout(width, availH) { const n = this._paths.length; if (!n) return { rows: 0, cols: 0, slot: 48, n }; const gap = 6, pad = 8; const MIN_SLOT = 38, MAX_SLOT = 800; const aW = width - pad * 2; const aH = availH - 16; let bestSlot = MIN_SLOT, bestRows = 1, bestCols = n; for (let r = 1; r <= n; r++) { const c = Math.ceil(n / r); const slotByW = Math.floor((aW - gap*(c-1)) / c); const slotByH = Math.floor((aH - gap*(r-1)) / r); const slot = Math.min(slotByW, slotByH, MAX_SLOT); if (slot >= MIN_SLOT && slot > bestSlot) { bestSlot = slot; bestRows = r; bestCols = c; } } return { rows: bestRows, cols: bestCols, slot: bestSlot, n }; },
                 _layout(width) { const availH = this._getAvailH(node, width); const { rows, cols, slot, n } = this._calcLayout(width, availH); const gap = 6, pad = 8, padV = 8; const totalW = cols * slot + (cols-1) * gap; const ox = pad + Math.max(0, (width - pad*2 - totalW) / 2); return this._paths.map((p, i) => { const col = i % cols, row = Math.floor(i / cols); const x = ox + col * (slot + gap); const y = padV + row * (slot + gap); return { p, x, y: y, w: slot, h: slot }; }); },
                 draw(ctx, node, width, y) {
                     if (!this._paths.length) return;
@@ -914,8 +957,20 @@ app.registerExtension({
                     layout.forEach(({p, x, y: ly, w, h}, i) => {
                         const ty = y + ly; const img = this._loaded[p];
                         if (this._dragOver === i && this._dragSrc !== i) { ctx.strokeStyle = "#4c6"; ctx.lineWidth = 2; ctx.strokeRect(x-2, ty-2, w+4, h+4); }
-                        if (img?.complete && img.naturalWidth) { const iw = img.naturalWidth, ih = img.naturalHeight; const scale = Math.min(w/iw, h/ih); const dw = iw*scale, dh = ih*scale; ctx.save(); if (this._dragSrc === i) ctx.globalAlpha = 0.35; ctx.drawImage(img, x+(w-dw)/2, ty+(h-dh)/2, dw, dh); ctx.restore(); } else { ctx.fillStyle = "#2a2a2a"; ctx.fillRect(x, ty, w, h); ctx.fillStyle = "#666"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("…", x+w/2, ty+h/2+4); }
+                        const labelH = Math.min(16, Math.max(12, Math.floor(h * 0.16)));
+                        const imageH = Math.max(20, h - labelH);
+                        if (img?.complete && img.naturalWidth) { const iw = img.naturalWidth, ih = img.naturalHeight; const scale = Math.min(w/iw, imageH/ih); const dw = iw*scale, dh = ih*scale; ctx.save(); if (this._dragSrc === i) ctx.globalAlpha = 0.35; ctx.drawImage(img, x+(w-dw)/2, ty+(imageH-dh)/2, dw, dh); ctx.restore(); } else { ctx.fillStyle = "#2a2a2a"; ctx.fillRect(x, ty, w, imageH); ctx.fillStyle = "#666"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("…", x+w/2, ty+imageH/2+4); }
                         ctx.fillStyle = "rgba(50,150,70,0.92)"; ctx.fillRect(x, ty, 15, 15); ctx.fillStyle = "#fff"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(i+1), x+7.5, ty+11);
+                        const res = img?.complete && img.naturalWidth ? `${img.naturalWidth}x${img.naturalHeight}` : "";
+                        if (res) {
+                            ctx.fillStyle = "rgba(0,0,0,0.45)";
+                            ctx.fillRect(x, ty + h - labelH, w, labelH);
+                            ctx.fillStyle = "rgba(210,245,255,0.9)";
+                            ctx.font = `${Math.max(8, Math.min(11, labelH - 3))}px sans-serif`;
+                            ctx.textAlign = "center";
+                            ctx.textBaseline = "middle";
+                            ctx.fillText(res, x + w / 2, ty + h - labelH / 2);
+                        }
                     });
                     ctx.textAlign = "left";
                 },
@@ -942,7 +997,7 @@ app.registerExtension({
                     let _dn2 = fname;
                     while (_dn2.length > 2 && _tc2.measureText(_dn2 + "…").width > _availPx2) { _dn2 = _dn2.slice(0, -1); }
                     if (_dn2 !== fname) _dn2 = _dn2.slice(0, -1) + "…";
-                    resumeBtn.name = "Resume: " + _dn2;
+                    resumeBtn.name = "Manage Resume Video";
                     resumeBtn._sqrActive = true;
                 }
                 node.setDirtyCanvas?.(true, true);
@@ -1015,7 +1070,7 @@ app.registerExtension({
                     const foW = getW("sqr_frame_offset"); if (foW) foW.value = fo;
                     setSqr("续跑视频路径", ckpt.transition_video);
                     const rtw = getW("启用续跑"); if (rtw) rtw.value = true;
-                    resumeBtn._sqrActive = true; resumeBtn.name = "Resume: " + ckpt.transition_video;
+                    resumeBtn._sqrActive = true; resumeBtn.name = "Manage Resume Video";
                     const fromW = getW("从第几段开始"); const segWw = getW("分段数");
                     if (mode === "auto") {
                         _sqrEnsureSegCapacity(ckpt.segments);
