@@ -449,7 +449,7 @@ def find_audio_filename(prompt: dict, node_id: str) -> str | None:
 
 def find_animate_embeds_node(prompt: dict) -> str | None:
     for nid, node in prompt.items():
-        if node.get("class_type") in ("WanVideoAnimateEmbeds", "WanAnimateToVideo", "SQRWanAnimateTransitionToVideo"):
+        if node.get("class_type") in ("WanVideoAnimateEmbeds", "WanAnimateToVideo", "SQRWanAnimateTransitionToVideo", "SQRSCAIL2TransitionToVideo"):
             return nid
     for nid, node in prompt.items():
         inputs = node.get("inputs", {})
@@ -462,7 +462,7 @@ def _sqr_node_supports_transition(prompt: dict, node_id: str) -> tuple[bool, str
     node = prompt.get(node_id, {}) if node_id else {}
     class_type = node.get("class_type", "") if isinstance(node, dict) else ""
     inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
-    supported = class_type in ("WanVideoAnimateEmbeds", "SQRWanAnimateTransitionToVideo")
+    supported = class_type in ("WanVideoAnimateEmbeds", "SQRWanAnimateTransitionToVideo", "SQRSCAIL2TransitionToVideo")
     if not supported and isinstance(inputs, dict) and "transition_video" in inputs:
         supported = True
     return supported, class_type
@@ -546,7 +546,20 @@ def interrupt_current(host=None):
 
 
 TRANSITION_FRAMES = 32
+SCAIL2_TRANSITION_FRAMES = 33
 KEEP_FULL_TRANSITION_IN_MERGE = True
+
+
+def _sqr_transition_frame_count(class_type: str) -> int:
+    if class_type == "SQRSCAIL2TransitionToVideo":
+        return SCAIL2_TRANSITION_FRAMES
+    return TRANSITION_FRAMES
+
+
+def _sqr_transition_added_frames(class_type: str) -> int:
+    if class_type == "SQRSCAIL2TransitionToVideo":
+        return SCAIL2_TRANSITION_FRAMES - 1
+    return TRANSITION_FRAMES
 
 
 def merge_videos(video_paths: list, output_path: str, target_fps: float = None) -> bool:
@@ -739,7 +752,19 @@ class SegmentQueueRunner:
         ae_nid = ae_node_id or find_animate_embeds_node(base_prompt) or ""
         vc_nid = find_video_combine_node(base_prompt, combine_nid) or ""
 
-        ref_images_list = [x.strip() for x in ref_imgs_str.split(",") if x.strip()]                           if ref_imgs_str else []
+        ref_images_list = []
+        if ref_imgs_str:
+            if ref_imgs_str.lstrip().startswith("["):
+                try:
+                    parsed_refs = json.loads(ref_imgs_str)
+                    if isinstance(parsed_refs, list):
+                        ref_images_list = [str(x).strip() for x in parsed_refs if str(x).strip()]
+                except Exception as e:
+                    print(f"[SQR] Reference image JSON parse failed; using legacy format: {e}")
+            if not ref_images_list:
+                import re as _re
+                legacy_refs = _re.findall(r"(?:^|,)\s*(.*?\.(?:png|jpe?g|webp|bmp))(?=,|$)", ref_imgs_str, flags=_re.IGNORECASE)
+                ref_images_list = [x.strip() for x in (legacy_refs or ref_imgs_str.split(",")) if x.strip()]
         if ref_images_list:
             ref_images_list = _sqr_prepare_checkpoint_ref_images(ref_images_list, unique_id=unique_id)
 
@@ -840,6 +865,8 @@ class SegmentQueueRunner:
 
                 _actual_skip = skip + _frame_offset
                 transition_supported, _ae_class_type = _sqr_node_supports_transition(wf, ae_nid)
+                transition_frames = _sqr_transition_frame_count(_ae_class_type)
+                transition_added_frames = _sqr_transition_added_frames(_ae_class_type)
                 force_direct_segment_merge = (not transition_enabled) or (not transition_supported)
                 use_transition = last_video_path is not None and transition_enabled and transition_supported
                 if force_direct_segment_merge:
@@ -861,9 +888,9 @@ class SegmentQueueRunner:
                 if vc_nid and vc_nid in wf and audio_filename:
                     _real_skip = skip + _frame_offset
                     if use_transition:
-                        audio_skip_frames    = max(0, _real_skip - (TRANSITION_FRAMES if KEEP_FULL_TRANSITION_IN_MERGE else TRIM))
-                        main_audio_frames    = max(0, _real_skip - TRANSITION_FRAMES)
-                        transition_note      = f"主节点skip{_real_skip}-32={main_audio_frames}帧, cut_vc skip{_real_skip}-{TRANSITION_FRAMES if KEEP_FULL_TRANSITION_IN_MERGE else TRIM}={audio_skip_frames}帧"
+                        audio_skip_frames    = max(0, _real_skip - (transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM))
+                        main_audio_frames    = max(0, _real_skip - transition_added_frames)
+                        transition_note      = f"主节点skip{_real_skip}-{transition_added_frames}={main_audio_frames}帧, cut_vc skip{_real_skip}-{transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM}={audio_skip_frames}帧"
                     else:
                         audio_skip_frames    = _real_skip
                         main_audio_frames    = _real_skip
@@ -887,14 +914,14 @@ class SegmentQueueRunner:
                 if ae_nid and ae_nid in wf:
                     if use_transition:
                         t_skip = skip_frames_manual if skip_frames_manual >= 0 \
-                                 else (max(0, last_video_frames - TRANSITION_FRAMES) if last_video_frames else 0)
+                                 else (max(0, last_video_frames - transition_frames) if last_video_frames else 0)
                         tv_tmp_id = f"sqr_tv_{seg_num}"
                         tv_inputs = {
                             "video":             os.path.basename(last_video_path),
                             "force_rate":        0,
                             "custom_width":      0,
                             "custom_height":     0,
-                            "frame_load_cap":    TRANSITION_FRAMES,
+                            "frame_load_cap":    transition_frames,
                             "skip_first_frames": t_skip,
                             "select_every_nth":  1,
                             "format":            "AnimateDiff",
@@ -906,7 +933,7 @@ class SegmentQueueRunner:
                         wf[tv_tmp_id] = {"class_type": "VHS_LoadVideo", "inputs": tv_inputs}
                         wf[ae_nid]["inputs"].pop("continue_motion", None)
                         wf[ae_nid]["inputs"]["transition_video"] = [tv_tmp_id, 0]
-                        log(f"  ✓ 过渡视频: {os.path.basename(last_video_path)} skip={t_skip} limit={TRANSITION_FRAMES}")
+                        log(f"  ✓ 过渡视频: {os.path.basename(last_video_path)} skip={t_skip} limit={transition_frames}")
                         log(f"  过渡调试: 已注入节点 {tv_tmp_id} -> {ae_nid}.transition_video, inputs={tv_inputs}")
                     else:
                         wf[ae_nid]["inputs"].pop("transition_video", None)
@@ -939,7 +966,7 @@ class SegmentQueueRunner:
 
                 TRIM = 16
                 is_last_seg = (seg_num == total_segs)
-                total_raw = limit + (TRANSITION_FRAMES if use_transition else 0)
+                total_raw = limit + (transition_added_frames if use_transition else 0)
 
                 image_src = image_src_node
                 if force_direct_segment_merge:
@@ -959,7 +986,7 @@ class SegmentQueueRunner:
                     final_image_node = ifb_a
                     log(f"  core裁切：不做过渡裁切，输出{trim_len}帧")
                 elif KEEP_FULL_TRANSITION_IN_MERGE:
-                    tail_trim = 0 if is_last_seg else TRANSITION_FRAMES
+                    tail_trim = 0 if is_last_seg else transition_added_frames
                     trim_start = 0
                     trim_len = max(1, total_raw - tail_trim)
                     ifb_a = f"sqr_ifb_{seg_num}_a"
@@ -967,7 +994,7 @@ class SegmentQueueRunner:
                                  "inputs": {"image": image_src, "batch_index": trim_start, "length": trim_len}}
                     final_image_node = ifb_a
                     if use_transition:
-                        log(f"  裁切：保留前{TRANSITION_FRAMES}帧过渡，裁后{tail_trim}帧→输出{trim_len}帧")
+                        log(f"  裁切：读取{transition_frames}帧过渡（有效新增{transition_added_frames}帧），裁后{tail_trim}帧→输出{trim_len}帧")
                     else:
                         log(f"  裁切：不裁前，裁后{tail_trim}帧→输出{trim_len}帧")
                 elif not use_transition:

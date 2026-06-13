@@ -7,6 +7,28 @@ function sqrThumbUrl(path) {
     return THUMB_URL + encodeURIComponent(path) + sep + "_ts=" + Date.now() + "_r=" + Math.random().toString(36).slice(2, 8);
 }
 
+function sqrParseRefPaths(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return [];
+    if (raw.startsWith("[")) {
+        try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed.map(v => String(v).trim()).filter(Boolean);
+        } catch (e) {
+            console.warn("[SQR] Failed to parse reference image JSON; using legacy format:", e);
+        }
+    }
+    const legacyMatches = [...raw.matchAll(/(?:^|,)\s*(.*?\.(?:png|jpe?g|webp|bmp))(?=,|$)/gi)]
+        .map(match => match[1]?.trim())
+        .filter(Boolean);
+    if (legacyMatches.length) return legacyMatches;
+    return raw.split(",").map(v => v.trim()).filter(Boolean);
+}
+
+function sqrStoreRefPaths(paths) {
+    return JSON.stringify((paths || []).map(v => String(v).trim()).filter(Boolean));
+}
+
 // ── Remote environment detection ─────────────────────────────────
 function _sqrIsRemote() {
     const h = window.location.hostname;
@@ -467,8 +489,90 @@ app.registerExtension({
                 };
             }
 
+            const SQR_NODE_ID_KEYS = ["参考图节点ID", "参考视频节点ID", "输出节点ID", "动作嵌入节点ID"];
+            const SQR_NODE_ID_TYPES = {
+                "参考图节点ID": ["LoadImage"],
+                "参考视频节点ID": ["VHS_LoadVideo"],
+                "输出节点ID": ["VHS_VideoCombine"],
+                "动作嵌入节点ID": ["SQRSCAIL2TransitionToVideo", "SQRWanAnimateTransitionToVideo", "WanSCAILToVideo", "WanAnimateToVideo", "WanVideoAnimateEmbeds"],
+            };
             const getSqr = k => getW(k)?.value || "";
-            const setSqr = (k, v) => { const w = getW(k); if (w) w.value = v; };
+            const isMatchingNodeId = (key, value) => {
+                const id = Number.parseInt(String(value ?? "").trim(), 10);
+                if (!Number.isFinite(id)) return false;
+                const target = app.graph?.getNodeById?.(id);
+                return !!target && SQR_NODE_ID_TYPES[key]?.includes(target.type);
+            };
+            const uniqueCandidateId = key => {
+                const types = SQR_NODE_ID_TYPES[key] || [];
+                const matches = (app.graph?._nodes || []).filter(n => n && n.mode !== 4 && types.includes(n.type));
+                return matches.length === 1 ? String(matches[0].id) : "";
+            };
+            const ensureNodeIdStore = () => {
+                node.properties ||= {};
+                node.properties.sqr_node_ids ||= {};
+                return node.properties.sqr_node_ids;
+            };
+            const persistNodeIds = () => {
+                const store = ensureNodeIdStore();
+                for (const key of SQR_NODE_ID_KEYS) store[key] = String(getW(key)?.value || "").trim();
+                return store;
+            };
+            const restoreNodeIds = source => {
+                if (!source || typeof source !== "object") return false;
+                let restored = false;
+                for (const key of SQR_NODE_ID_KEYS) {
+                    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+                    const w = getW(key);
+                    if (w) {
+                        w.value = String(source[key] ?? "").trim();
+                        restored = true;
+                    }
+                }
+                if (restored) {
+                    node.properties ||= {};
+                    node.properties.sqr_node_ids = { ...source };
+                    node.setDirtyCanvas?.(true, true);
+                }
+                return restored;
+            };
+            const setSqr = (k, v) => {
+                const w = getW(k);
+                if (w) w.value = v;
+                if (SQR_NODE_ID_KEYS.includes(k)) ensureNodeIdStore()[k] = String(v ?? "").trim();
+            };
+
+            const _origSqrSerialize = node.onSerialize;
+            node.onSerialize = function(data) {
+                if (_origSqrSerialize) _origSqrSerialize.call(this, data);
+                const ids = persistNodeIds();
+                data.properties ||= {};
+                data.properties.sqr_node_ids = { ...ids };
+            };
+
+            const _origSqrConfigure = node.onConfigure;
+            node.onConfigure = function(data) {
+                const result = _origSqrConfigure ? _origSqrConfigure.call(this, data) : undefined;
+                const positional = Object.fromEntries(SQR_NODE_ID_KEYS.map(key => [key, String(getW(key)?.value || "").trim()]));
+                const saved = data?.properties?.sqr_node_ids || this.properties?.sqr_node_ids;
+                setTimeout(() => {
+                    const repaired = {};
+                    for (const key of SQR_NODE_ID_KEYS) {
+                        const savedValue = String(saved?.[key] ?? "").trim();
+                        const positionalValue = positional[key];
+                        repaired[key] = isMatchingNodeId(key, savedValue)
+                            ? savedValue
+                            : isMatchingNodeId(key, positionalValue)
+                                ? positionalValue
+                                : uniqueCandidateId(key);
+                    }
+                    restoreNodeIds(repaired);
+                    persistNodeIds();
+                }, 250);
+                return result;
+            };
+
+            if (node.properties?.sqr_node_ids) restoreNodeIds(node.properties.sqr_node_ids);
 
             const _SQR_PNG_KEY   = "sqr_save_png";
             const _SQR_SEGMAX_KEY = "sqr_seg_max";
@@ -885,7 +989,7 @@ app.registerExtension({
             // ── Reference image manager ──
             const showRefManager = (onConfirm) => {
                 document.getElementById("sqr-mgr-overlay")?.remove();
-                const paths = (getSqr("分段参考图")||"").split(",").map(s=>s.trim()).filter(Boolean);
+                const paths = sqrParseRefPaths(getSqr("分段参考图"));
                 let dragIdx = null;
                 const overlay = document.createElement("div");overlay.id = "sqr-mgr-overlay";Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"10001",background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center"});
                 const box = document.createElement("div");Object.assign(box.style,{background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#444)",borderRadius:"12px",padding:"18px 22px",width:"680px",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
@@ -925,8 +1029,8 @@ app.registerExtension({
                 // Use the browser dialog consistently across local and remote environments.
                 try {
                     const saved = await _sqrPickAndUploadImages();
-                    if (saved.length) { const cur = (getSqr("分段参考图")||"").split(",").map(s=>s.trim()).filter(Boolean); saved.forEach(name => { if (!cur.includes(name)) cur.push(name); }); setSqr("分段参考图", cur.join(",")); refThumbWidget.syncPaths(); }
-                    showRefManager(result => { setSqr("分段参考图", result.join(",")); refThumbWidget.syncPaths(); node.setDirtyCanvas?.(true, true); });
+                    if (saved.length) { const cur = sqrParseRefPaths(getSqr("分段参考图")); saved.forEach(name => { if (!cur.includes(name)) cur.push(name); }); setSqr("分段参考图", sqrStoreRefPaths(cur)); refThumbWidget.syncPaths(); }
+                    showRefManager(result => { setSqr("分段参考图", sqrStoreRefPaths(result)); refThumbWidget.syncPaths(); node.setDirtyCanvas?.(true, true); });
                 } catch(e) { console.warn("[SQR] Reference image selection failed:", e); }
             };
             const refBtn = node.addWidget("button", "Select Reference Images", null, () => {
@@ -939,7 +1043,7 @@ app.registerExtension({
                 name: "_sqr_ref_thumbs", type: "sqr_thumbs", serialize: false,
                 _paths: [], _loaded: {}, _dragSrc: -1, _dragOver: -1,
                 syncPaths() {
-                    this._paths = (getSqr("分段参考图")||"").split(",").map(s=>s.trim()).filter(Boolean);
+                    this._paths = sqrParseRefPaths(getSqr("分段参考图"));
                     const nextLoaded = {};
                     this._paths.forEach(p => { const img = new Image(); img.src = sqrThumbUrl(p); img.onload = () => node.setDirtyCanvas?.(true, true); nextLoaded[p] = img; });
                     this._loaded = nextLoaded;
@@ -980,7 +1084,7 @@ app.registerExtension({
                     const lx = pos[0], ly = pos[1], w = node.size[0];
                     if (evt.type === "mousedown" && evt.button === 0) { const i = this._idxAt(lx, ly, w); if (i >= 0) { this._dragSrc = i; this._dragOver = i; return true; } }
                     if (evt.type === "mousemove" && this._dragSrc >= 0) { const i = this._idxAt(lx, ly, w); if (i >= 0) this._dragOver = i; node.setDirtyCanvas?.(true, true); return true; }
-                    if (evt.type === "mouseup" && this._dragSrc >= 0) { const src = this._dragSrc, over = this._dragOver; this._dragSrc = -1; this._dragOver = -1; if (src !== over && over >= 0) { const arr = [...this._paths]; const [m] = arr.splice(src, 1); arr.splice(over, 0, m); setSqr("分段参考图", arr.join(",")); this.syncPaths(); } node.setDirtyCanvas?.(true, true); return true; }
+                    if (evt.type === "mouseup" && this._dragSrc >= 0) { const src = this._dragSrc, over = this._dragOver; this._dragSrc = -1; this._dragOver = -1; if (src !== over && over >= 0) { const arr = [...this._paths]; const [m] = arr.splice(src, 1); arr.splice(over, 0, m); setSqr("分段参考图", sqrStoreRefPaths(arr)); this.syncPaths(); } node.setDirtyCanvas?.(true, true); return true; }
                     return false;
                 }
             };
@@ -1077,12 +1181,12 @@ app.registerExtension({
                         if (segWw) segWw.value = ckpt.segments;
                         if (fromW) fromW.value = Math.min(ckpt.next_seg, ckpt.total_segs);
                         if (lvBad) { try { const vn = app.graph?.getNodeById?.(parseInt(getSqr("参考视频节点ID"))); if (vn) { const sv=(n,v)=>{const w=vn.widgets?.find(w=>w.name===n);if(w)w.value=v;}; sv("video",ckptParams.video);sv("force_rate",ckptParams.force_rate);sv("frame_load_cap",ckptParams.frame_load_cap);sv("skip_first_frames",ckptParams.skip_first_frames);sv("select_every_nth",ckptParams.select_every_nth);vn.setDirtyCanvas?.(true,true); } } catch(e) {} }
-                        if (ckpt.ref_images?.length) { const si = Math.min(ckpt.next_seg-1, ckpt.ref_images.length-1); const sl = ckpt.ref_images.slice(si); if (sl.length) setSqr("分段参考图", sl.join(",")); }
+                        if (ckpt.ref_images?.length) { const si = Math.min(ckpt.next_seg-1, ckpt.ref_images.length-1); const sl = ckpt.ref_images.slice(si); if (sl.length) setSqr("分段参考图", sqrStoreRefPaths(sl)); }
                     } else {
                         if (fromW) fromW.value = 1;
                         if (opts.newSegCount) _sqrEnsureSegCapacity(opts.newSegCount);
                         if (opts.newSegCount && segWw) segWw.value = opts.newSegCount;
-                        if (opts.newRefs?.length) setSqr("分段参考图", opts.newRefs.join(","));
+                        if (opts.newRefs?.length) setSqr("分段参考图", sqrStoreRefPaths(opts.newRefs));
                     }
                     if (segWw && startW) { startW.options.max = Math.round(segWw.value); if (startW.value > startW.options.max) startW.value = startW.options.max; }
                     const tw = node.widgets?.find(w=>w.name==="_sqr_ref_thumbs"); if (tw) tw.syncPaths?.();
