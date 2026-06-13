@@ -20,6 +20,15 @@ git clone https://github.com/zere111ai/ComfyUI-WanAni-SQR.git
 
 ## 📢 Changelog
 
+### 20260614
+中文：
+新增 SCAIL2 Transition 节点识别与动态过渡时长支持。队列会根据 WanAnimate 或 SCAIL2 自动调整过渡视频读取、裁切、合并及音频偏移，同时包含节点界面、图片加载和 Node ID 稳定性优化。
+
+English:
+Added SCAIL2 Transition node detection and model-specific transition timing. The queue now automatically adjusts transition loading, trimming, merging, and audio offsets for WanAnimate and SCAIL2, with additional UI, image loading, and Node ID reliability improvements.
+
+
+
 ### [v2.4] - 2026-04-06
 **Core Update: Adaptive Enhancement & UI/UX Optimization**
 - **ComfyUI Port Auto-Recognition**: Automatically adapt to local usage and remote calls (RH adaptation pending KJ's wrapper node merge)
