@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-wanani-sqr"
-version = "2.5.1"
-description = "WanAnimate-focused segment queue runner for long video workflows."
+version = "3.0.0"
+description = "Segment queue runner with integrated WanAnimate and SCAIL2 transition nodes."
 authors = [{name = "FeiHou"}]
 license = "MIT"
 dependencies = []
