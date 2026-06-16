@@ -4,6 +4,27 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+
+## New Nodes 2026-JUN-17
+
+Add SCAIL-2 multi-reference support to WanAni SQR with segment-queue integration and resolution-aware reference handling.
+Description
+This update adds an experimental SCAIL-2 multi-reference pipeline for WanAni SQR.
+
+Changes include:
+Added Wan SQR Multi Reference node for ordered multi-image reference batching.
+Added LH Resolution Setting node with landscape/portrait presets, common aspect ratios, 480p-to-4K options, and manual width/height override.
+Added Multi Ref ON/OFF toggle to the WanAni SQR top bar.
+When Multi Ref ON, WanAni SQR now sends its selected reference image list into Wan SQR Multi Reference in order.
+When Multi Ref OFF, WanAni SQR keeps the original per-segment single-reference behavior.
+Added SCAIL-2 colored mask advanced mode for single-person multi-reference and multi-person grouping.
+Added official-style SCAIL-2 additional reference image/mask support.
+Added reference batch splitting for main reference and additional references.
+Fixed SCAIL-2 context-window mask slicing for multi-reference timelines.
+Updated SCAIL-2 transition handling to use the 17/16 frame transition path with latent carry support.
+Improved reference mask preview so all reference masks can be viewed, not only the main reference mask.
+Updated frontend node ID selection and SQR controls for multi-reference workflows.
+
 ## Integrated Transition Nodes 2026-JUN-14
 
 The functionality previously provided by the separate `SQR-WAN-Transition`
