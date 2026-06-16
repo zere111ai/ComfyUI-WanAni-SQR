@@ -4,7 +4,7 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
-## Integrated Transition Nodes
+## Integrated Transition Nodes 2026-JUN-14
 
 The functionality previously provided by the separate `SQR-WAN-Transition`
 plugin is now included directly in this project:
