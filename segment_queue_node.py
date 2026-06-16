@@ -474,6 +474,13 @@ def find_animate_embeds_node(prompt: dict) -> str | None:
     return None
 
 
+def find_multi_reference_node(prompt: dict) -> str | None:
+    for nid, node in prompt.items():
+        if node.get("class_type") in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
+            return nid
+    return None
+
+
 def _sqr_node_supports_transition(prompt: dict, node_id: str) -> tuple[bool, str]:
     node = prompt.get(node_id, {}) if node_id else {}
     class_type = node.get("class_type", "") if isinstance(node, dict) else ""
@@ -827,6 +834,8 @@ class SegmentQueueRunner:
                 "参考图节点ID":   ("STRING", {"default": ""}),
                 "分段参考图":     ("STRING", {"default": ""}),
                 "续跑视频路径":   ("STRING", {"default": ""}),
+                "multi_ref_enabled": ("BOOLEAN", {"default": False,
+                    "tooltip": "Multi Ref OFF keeps the original per-segment reference mode. Multi Ref ON loads the selected references as one single-person multi-reference batch for every segment."}),
                 "sqr_save_png":      ("STRING", {"default": "true"}),
                 "sqr_frame_offset":  ("INT",    {"default": -1}),
                 "sqr_pre_segments":  ("STRING", {"default": ""}),
@@ -842,6 +851,7 @@ class SegmentQueueRunner:
             执行, 启用续跑,
             参考视频节点ID, 输出节点ID, 动作嵌入节点ID, 参考图节点ID,
             分段参考图, 续跑视频路径,
+            multi_ref_enabled=False,
             sqr_save_png="true",
             sqr_frame_offset=-1,
             sqr_pre_segments="",
@@ -851,6 +861,7 @@ class SegmentQueueRunner:
         total_frames       = 总帧数
         segments           = 分段数
         transition_enabled = bool(启用过渡效果)
+        multi_ref_enabled  = bool(multi_ref_enabled)
         node_id            = 参考视频节点ID.strip()
         frame_rate         = 帧率
         combine_nid        = 输出节点ID.strip()
@@ -1163,29 +1174,58 @@ class SegmentQueueRunner:
                         wf[ae_nid]["inputs"].pop("continue_motion", None)
                         log(f"  首段无过渡")
 
-                if ref_images_list and ri_node_id and ri_node_id in wf:
-                    img_idx   = min(i, len(ref_images_list) - 1)
-                    img_entry = ref_images_list[img_idx]
-                    if os.path.isabs(img_entry):
-                        import shutil as _shutil
-                        input_dir = folder_paths.get_input_directory()
-                        src_real  = os.path.realpath(img_entry)
-                        if os.path.realpath(os.path.dirname(src_real)) == os.path.realpath(input_dir):
-                            img_name = os.path.basename(src_real)
-                        else:
+                ref_target_id = ri_node_id
+                if multi_ref_enabled:
+                    ref_target_id = (ri_node_id if ri_node_id and wf.get(ri_node_id, {}).get("class_type") in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack") else None) or find_multi_reference_node(wf) or ri_node_id
+
+                if ref_images_list and ref_target_id and ref_target_id in wf:
+                    def _sqr_ref_entry_to_input_name(img_entry):
+                        if os.path.isabs(img_entry):
+                            import shutil as _shutil
+                            input_dir = folder_paths.get_input_directory()
+                            src_real = os.path.realpath(img_entry)
+                            if os.path.realpath(os.path.dirname(src_real)) == os.path.realpath(input_dir):
+                                return os.path.basename(src_real)
                             img_fname = _build_safe_input_copy_name(src_real, unique_id=unique_id, prefix="sqr_refrun")
-                            img_dst   = os.path.join(input_dir, img_fname)
+                            img_dst = os.path.join(input_dir, img_fname)
                             try:
                                 _shutil.copy2(src_real, img_dst)
                             except Exception as e:
-                                log(f"  ⚠ 参考图复制失败: {e}")
-                            img_name = img_fname
+                                log(f"  ! reference image copy failed: {e}")
+                            return img_fname
+                        return img_entry
+
+                    ref_node = wf.get(ref_target_id, {})
+                    ref_class = ref_node.get("class_type", "")
+                    ref_inputs = ref_node.setdefault("inputs", {})
+                    if multi_ref_enabled and ref_class in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
+                        max_refs = min(len(ref_images_list), 6)
+                        for ref_slot in range(1, 7):
+                            ref_inputs.pop(f"image_{ref_slot}", None)
+                        for ref_slot, img_entry in enumerate(ref_images_list[:max_refs], start=1):
+                            img_name = _sqr_ref_entry_to_input_name(img_entry)
+                            load_id = f"sqr_mref_{seg_num}_{ref_slot}"
+                            wf[load_id] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
+                            ref_inputs[f"image_{ref_slot}"] = [load_id, 0]
+                        log(f"  OK Multi Ref: loaded {max_refs} reference images into {ref_class}")
                     else:
-                        img_name = img_entry
-                    wf[ri_node_id]["inputs"]["image"] = img_name
-                    wv = wf[ri_node_id].get("widgets_values", [])
-                    if wv: wv[0] = img_name
-                    log(f"  ✓ 参考图[{img_idx+1}]: {img_name}")
+                        if multi_ref_enabled:
+                            log(f"  ! Multi Ref ON expects reference node ID to point to Wan SQR Multi Reference; current={ref_class or 'Unknown'}, fallback to single image mode")
+                        img_idx = min(i, len(ref_images_list) - 1)
+                        img_entry = ref_images_list[img_idx]
+                        img_name = _sqr_ref_entry_to_input_name(img_entry)
+                        if ref_class in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
+                            for ref_slot in range(1, 7):
+                                ref_inputs.pop(f"image_{ref_slot}", None)
+                            load_id = f"sqr_ref_{seg_num}_1"
+                            wf[load_id] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
+                            ref_inputs["image_1"] = [load_id, 0]
+                        else:
+                            ref_inputs["image"] = img_name
+                            wv = ref_node.get("widgets_values", [])
+                            if wv:
+                                wv[0] = img_name
+                        log(f"  OK reference image[{img_idx+1}]: {img_name}")
 
                 TRIM = 16
                 is_last_seg = (seg_num == total_segs)

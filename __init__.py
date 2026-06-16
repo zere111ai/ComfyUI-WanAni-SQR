@@ -4,15 +4,21 @@ from .segment_queue_node import (
 )
 from .wan_transition_node import SQRWanAnimateTransitionToVideo
 from .scail_transition_node import SQRSCAIL2TransitionToVideo
+from .scail_reference_nodes import (
+    NODE_CLASS_MAPPINGS as SCAIL_REFERENCE_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as SCAIL_REFERENCE_NODE_DISPLAY_NAME_MAPPINGS,
+)
 
 NODE_CLASS_MAPPINGS = {
     **QUEUE_NODE_CLASS_MAPPINGS,
+    **SCAIL_REFERENCE_NODE_CLASS_MAPPINGS,
     "SQRWanAnimateTransitionToVideo": SQRWanAnimateTransitionToVideo,
     "SQRSCAIL2TransitionToVideo": SQRSCAIL2TransitionToVideo,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     **QUEUE_NODE_DISPLAY_NAME_MAPPINGS,
+    **SCAIL_REFERENCE_NODE_DISPLAY_NAME_MAPPINGS,
     "SQRWanAnimateTransitionToVideo": "SQR WanAnimate Transition To Video",
     "SQRSCAIL2TransitionToVideo": "SQR SCAIL2 Transition To Video",
 }

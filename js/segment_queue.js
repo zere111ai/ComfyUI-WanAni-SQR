@@ -423,6 +423,13 @@ app.registerExtension({
 
             const segW = getW("分段数");
             const startW = getW("从第几段开始");
+            let multiRefW = getW("multi_ref_enabled");
+            if (!multiRefW) {
+                multiRefW = node.addWidget("toggle", "multi_ref_enabled", false, () => {
+                    node.setDirtyCanvas?.(true, true);
+                });
+                multiRefW.serialize = true;
+            }
             let transitionW = getW("启用过渡效果");
             if (!transitionW) {
                 transitionW = node.addWidget("toggle", "启用过渡效果", false, () => {
@@ -440,6 +447,10 @@ app.registerExtension({
             if (transitionW) {
                 transitionW.computeSize = () => [0, -4];
                 transitionW.draw = () => {};
+            }
+            if (multiRefW) {
+                multiRefW.computeSize = () => [0, -4];
+                multiRefW.draw = () => {};
             }
 
             function _sqrApplySegMax() {
@@ -491,7 +502,7 @@ app.registerExtension({
 
             const SQR_NODE_ID_KEYS = ["参考图节点ID", "参考视频节点ID", "输出节点ID", "动作嵌入节点ID"];
             const SQR_NODE_ID_TYPES = {
-                "参考图节点ID": ["LoadImage"],
+                "参考图节点ID": ["LoadImage", "WanSQRMultiReference", "SQRScail2ReferenceBatchStack"],
                 "参考视频节点ID": ["VHS_LoadVideo"],
                 "输出节点ID": ["VHS_VideoCombine"],
                 "动作嵌入节点ID": ["SQRSCAIL2TransitionToVideo", "SQRWanAnimateTransitionToVideo", "WanSCAILToVideo", "WanAnimateToVideo", "WanVideoAnimateEmbeds"],
@@ -728,7 +739,7 @@ app.registerExtension({
             // ── Node ID dialog ──
             const nodeIdBtn = node.addWidget("button", "Node IDs", null, () => {
                 showNodeIdSelector([
-                    {key:"参考图节点ID",   label:"Reference Image LoadImage ID", tooltip:"LoadImage node ID",              value:getSqr("参考图节点ID")},
+                    {key:"参考图节点ID",   label:"Reference / Multi Reference ID", tooltip:"LoadImage ID for OFF mode, Wan SQR Multi Reference ID for ON mode",              value:getSqr("参考图节点ID")},
                     {key:"参考视频节点ID", label:"Reference Video Load Video ID", tooltip:"Load Video target node ID",      value:getSqr("参考视频节点ID")},
                     {key:"输出节点ID",     label:"Output VHS_VideoCombine ID",   tooltip:"Main output VHS_VideoCombine ID",value:getSqr("输出节点ID")},
                     {key:"动作嵌入节点ID", label:"SQR WanAnimate Transition ID", tooltip:"SQR WanAnimate Transition node ID", value:getSqr("动作嵌入节点ID")},
@@ -780,13 +791,15 @@ app.registerExtension({
                     _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
                     _sqrDrawTopButton(ctx, "log", rightX + actionW + idsW + gap * 2, topY, logW, h, "Log", false, { mode: "action", hitY: 4 });
 
-                    const toggleW = Math.max(76, Math.min(102, (width - actionW - idsW - logW - 42) / 2));
-                    const totalW = toggleW * 2 + gap;
+                    const toggleW = Math.max(72, Math.min(98, (width - actionW - idsW - logW - 54) / 3));
+                    const totalW = toggleW * 3 + gap * 2;
                     const midX = Math.max(7, Math.min((width - totalW) / 2, rightX - totalW - 8));
+                    const multiRefOn = !!multiRefW?.value;
                     const transOn = !!transitionW?.value;
                     const execOn = !!execW?.value;
-                    _sqrDrawTopButton(ctx, "transition", midX, topY, toggleW, h, transOn ? "Transition ON" : "Transition OFF", transOn, { hitY: 4 });
-                    _sqrDrawTopButton(ctx, "execute", midX + toggleW + gap, topY, toggleW, h, execOn ? "Execute Mode" : "Preview Mode", execOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "multiref", midX, topY, toggleW, h, multiRefOn ? "Multi Ref ON" : "Multi Ref OFF", multiRefOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "transition", midX + toggleW + gap, topY, toggleW, h, transOn ? "Transition ON" : "Transition OFF", transOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "execute", midX + (toggleW + gap) * 2, topY, toggleW, h, execOn ? "Execute Mode" : "Preview Mode", execOn, { hitY: 4 });
                 },
                 mouse(event, pos, nodeRef) {
                     if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
@@ -795,7 +808,10 @@ app.registerExtension({
                         const hitWidgetLocal = x >= r.x && x <= r.x + r.w && y >= r.localY && y <= r.localY + r.h;
                         const hitNodeLocal = x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
                         if (hitWidgetLocal || hitNodeLocal) {
-                            if (key === "transition" && transitionW) {
+                            if (key === "multiref" && multiRefW) {
+                                multiRefW.value = !multiRefW.value;
+                                multiRefW.callback?.(multiRefW.value);
+                            } else if (key === "transition" && transitionW) {
                                 transitionW.value = !transitionW.value;
                                 transitionW.callback?.(transitionW.value);
                             } else if (key === "execute" && execW) {

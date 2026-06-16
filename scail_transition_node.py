@@ -84,6 +84,8 @@ class SQRSCAIL2TransitionToVideo:
                 "pose_video_mask": ("IMAGE",),
                 "reference_image": ("IMAGE",),
                 "reference_image_mask": ("IMAGE",),
+                "additional_reference_images": ("IMAGE",),
+                "additional_reference_masks": ("IMAGE",),
                 "clip_vision_output": ("CLIP_VISION_OUTPUT",),
                 "previous_frames": ("IMAGE",),
                 "transition_video": ("IMAGE",),
@@ -101,6 +103,7 @@ class SQRSCAIL2TransitionToVideo:
                 pose_strength, pose_start, pose_end, video_frame_offset,
                 previous_frame_count, replacement_mode=False, pose_video=None,
                 pose_video_mask=None, reference_image=None, reference_image_mask=None,
+                additional_reference_images=None, additional_reference_masks=None,
                 clip_vision_output=None, previous_frames=None, transition_video=None,
                 transition_latent=None):
         original_length = length
@@ -222,18 +225,37 @@ class SQRSCAIL2TransitionToVideo:
         positive = node_helpers.conditioning_set_values(positive, {"ref_mask_flag": ref_mask_flag})
         negative = node_helpers.conditioning_set_values(negative, {"ref_mask_flag": ref_mask_flag})
 
-        ref_latent = None
-        if reference_image is not None:
-            reference_image = comfy.utils.common_upscale(reference_image[:1].movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
-            if replacement_mode and reference_image_mask is not None:
-                ref_mask = comfy.utils.common_upscale(reference_image_mask[:1].movedim(-1, 1), width, height, "nearest-exact", "center").movedim(1, -1)
-                is_character = (ref_mask[..., :3].max(dim=-1, keepdim=True).values > 0.1).to(reference_image.dtype)
-                reference_image = reference_image * is_character
-            ref_latent = vae.encode(reference_image[:, :, :, :3])
+        ref_latents = []
+        ref_masks_28ch = []
 
-        if ref_latent is not None:
-            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [ref_latent]}, append=True)
-            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [ref_latent]}, append=True)
+        def add_reference(ref_image, ref_mask=None):
+            ref_image = comfy.utils.common_upscale(ref_image[:1].movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
+            if replacement_mode and ref_mask is not None:
+                rm = comfy.utils.common_upscale(ref_mask[:1].movedim(-1, 1), width, height, "nearest-exact", "center").movedim(1, -1)
+                is_character = (rm[..., :3].max(dim=-1, keepdim=True).values > 0.1).to(ref_image.dtype)
+                ref_image = ref_image * is_character
+            ref_latents.append(vae.encode(ref_image[:, :, :, :3]))
+            if ref_mask is not None:
+                ref_mask_hw = comfy.utils.common_upscale(ref_mask[:1].movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
+                ref_masks_28ch.append(_extract_mask_to_28ch(ref_mask_hw))
+
+        if reference_image is not None:
+            add_reference(reference_image, reference_image_mask)
+        if additional_reference_images is not None:
+            add_count = additional_reference_images.shape[0]
+            mask_count = additional_reference_masks.shape[0] if additional_reference_masks is not None else 0
+            for ref_index in range(add_count):
+                add_mask = additional_reference_masks[ref_index:ref_index + 1] if ref_index < mask_count else None
+                add_reference(additional_reference_images[ref_index:ref_index + 1], add_mask)
+
+        if ref_latents:
+            combined_ref_latent = torch.cat(ref_latents, dim=2)
+            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [combined_ref_latent]}, append=True)
+            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [combined_ref_latent]}, append=True)
+            log.info(
+                "[SQR-SCAIL-TRANS] references=%s combined_ref_latent=%s masks=%s",
+                len(ref_latents), _shape(combined_ref_latent), len(ref_masks_28ch),
+            )
         if clip_vision_output is not None:
             positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
             negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision_output})
@@ -258,11 +280,10 @@ class SQRSCAIL2TransitionToVideo:
             positive = node_helpers.conditioning_set_values(positive, {"driving_mask_28ch": driving_mask})
             negative = node_helpers.conditioning_set_values(negative, {"driving_mask_28ch": driving_mask})
 
-        if reference_image_mask is not None:
-            ref_mask = comfy.utils.common_upscale(reference_image_mask[:1].movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
-            ref_mask_one = _extract_mask_to_28ch(ref_mask)
-            zeros = torch.zeros((1, latent.shape[2], 28, ref_mask_one.shape[-2], ref_mask_one.shape[-1]), device=ref_mask_one.device, dtype=ref_mask_one.dtype)
-            ref_mask_all = torch.cat([ref_mask_one, zeros], dim=1)
+        if ref_masks_28ch:
+            ref_mask_refs = torch.cat(ref_masks_28ch, dim=1)
+            zeros = torch.zeros((1, latent.shape[2], 28, ref_mask_refs.shape[-2], ref_mask_refs.shape[-1]), device=ref_mask_refs.device, dtype=ref_mask_refs.dtype)
+            ref_mask_all = torch.cat([ref_mask_refs, zeros], dim=1)
             positive = node_helpers.conditioning_set_values(positive, {"ref_mask_28ch": ref_mask_all})
             negative = node_helpers.conditioning_set_values(negative, {"ref_mask_28ch": ref_mask_all})
 
