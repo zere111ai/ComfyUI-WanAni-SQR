@@ -447,6 +447,22 @@ def find_audio_filename(prompt: dict, node_id: str) -> str | None:
     return None
 
 
+def find_latent_source_for_images(prompt: dict, image_src_node):
+    if not (isinstance(image_src_node, list) and len(image_src_node) == 2):
+        return None
+    nid = str(image_src_node[0])
+    node = prompt.get(nid, {})
+    class_type = node.get("class_type", "") if isinstance(node, dict) else ""
+    inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
+    if class_type in ("VAEDecode", "VAEDecodeTiled"):
+        samples = inputs.get("samples")
+        if isinstance(samples, list) and len(samples) == 2:
+            return samples
+    if class_type == "ImageFromBatch":
+        return find_latent_source_for_images(prompt, inputs.get("image"))
+    return None
+
+
 def find_animate_embeds_node(prompt: dict) -> str | None:
     for nid, node in prompt.items():
         if node.get("class_type") in ("WanVideoAnimateEmbeds", "WanAnimateToVideo", "SQRWanAnimateTransitionToVideo", "SQRSCAIL2TransitionToVideo"):
@@ -535,6 +551,46 @@ def get_output_video_info(prompt_id, combine_node_id, host=None, logger=None):
     return None, None
 
 
+def get_output_latent_info(prompt_id, latent_node_id, host=None, logger=None):
+    last_err = None
+    for _host in [host or _sqr_get_comfy_host(), _sqr_get_comfy_host(force_refresh=True)]:
+        try:
+            with urllib.request.urlopen(f"http://{_host}/history/{prompt_id}", timeout=10) as resp:
+                history = json.loads(resp.read())
+            node_out = history.get(prompt_id, {}).get("outputs", {}).get(str(latent_node_id), {})
+            latents = node_out.get("latents", [])
+            if not latents:
+                return None
+            li = latents[0]
+            base_dir = folder_paths.get_output_directory() if li.get("type") == "output" \
+                       else folder_paths.get_input_directory()
+            subfolder = li.get("subfolder", "")
+            return os.path.join(base_dir, subfolder, li["filename"]) if subfolder \
+                   else os.path.join(base_dir, li["filename"])
+        except Exception as e:
+            last_err = e
+    msg = f"✗ 获取 latent 信息失败: {_sqr_format_exc(last_err)}" if last_err else "✗ 获取 latent 信息失败"
+    if logger:
+        logger(msg)
+    else:
+        print(f"[SQR] {msg}")
+    return None
+
+
+def _sqr_copy_latent_into_input(path: str, unique_id=None, seg_num=None) -> str | None:
+    if not path or not os.path.isfile(path):
+        return None
+    input_dir = folder_paths.get_input_directory()
+    os.makedirs(input_dir, exist_ok=True)
+    tag = f"_{unique_id}" if unique_id else ""
+    seg = f"_seg{seg_num}" if seg_num is not None else ""
+    dst_name = f"sqr_latent{tag}{seg}_{_sqr_now_stamp()}.latent"
+    dst = os.path.join(input_dir, dst_name)
+    import shutil
+    shutil.copy2(path, dst)
+    return dst_name
+
+
 def interrupt_current(host=None):
     for _host in [host or _sqr_get_comfy_host(), _sqr_get_comfy_host(force_refresh=True)]:
         try:
@@ -546,7 +602,7 @@ def interrupt_current(host=None):
 
 
 TRANSITION_FRAMES = 32
-SCAIL2_TRANSITION_FRAMES = 33
+SCAIL2_TRANSITION_FRAMES = 17
 KEEP_FULL_TRANSITION_IN_MERGE = True
 
 
@@ -562,59 +618,178 @@ def _sqr_transition_added_frames(class_type: str) -> int:
     return TRANSITION_FRAMES
 
 
-def merge_videos(video_paths: list, output_path: str, target_fps: float = None) -> bool:
+class SQRReplaceBatchPrefix:
+    """Replace VAE-decoded carry frames with the original decoded video frames."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "prefix_images": ("IMAGE",),
+                "prefix_length": ("INT", {"default": 32, "min": 0, "max": 4096}),
+                "prefix_start": ("INT", {"default": 0, "min": 0, "max": 16}),
+                "color_release_frames": ("INT", {"default": 20, "min": 0, "max": 64}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "replace"
+    CATEGORY = "video/utils"
+
+    def replace(self, images, prefix_images, prefix_length, prefix_start,
+                color_release_frames):
+        import torch
+
+        start = min(max(0, int(prefix_start)), prefix_images.shape[0])
+        count = min(int(prefix_length), images.shape[0], prefix_images.shape[0] - start)
+        if count <= 0:
+            return (images,)
+
+        prefix = prefix_images[start:start + count]
+        if prefix.shape[1:3] != images.shape[1:3]:
+            prefix = torch.nn.functional.interpolate(
+                prefix.movedim(-1, 1),
+                size=images.shape[1:3],
+                mode="area",
+            ).movedim(1, -1)
+        prefix = prefix.to(device=images.device, dtype=images.dtype)
+
+        if start > 0:
+            boundary = prefix_images[start - 1:start]
+            if boundary.shape[1:3] != images.shape[1:3]:
+                boundary = torch.nn.functional.interpolate(
+                    boundary.movedim(-1, 1),
+                    size=images.shape[1:3],
+                    mode="area",
+                ).movedim(1, -1)
+            boundary = boundary.to(device=images.device, dtype=images.dtype).float()
+            dims = (0, 1, 2)
+            boundary_mean = boundary.mean(dim=dims, keepdim=True)
+            boundary_std = boundary.std(dim=dims, keepdim=True).clamp_min(1e-4)
+            seam_release = min(8, prefix.shape[0])
+            for frame_index in range(seam_release):
+                frame = prefix[frame_index:frame_index + 1].float()
+                frame_mean = frame.mean(dim=dims, keepdim=True)
+                frame_std = frame.std(dim=dims, keepdim=True).clamp_min(1e-4)
+                gain = (boundary_std / frame_std).clamp(0.85, 1.18)
+                offset = (boundary_mean - frame_mean * gain).clamp(-0.12, 0.12)
+                progress = frame_index / max(1, seam_release - 1)
+                amount = 1.0 - progress * progress * (3.0 - 2.0 * progress)
+                prefix[frame_index:frame_index + 1] = torch.lerp(
+                    frame, frame * gain + offset, amount
+                ).clamp(0.0, 1.0).to(prefix.dtype)
+
+        suffix = images[count:].clone()
+
+        release_count = min(int(color_release_frames), suffix.shape[0])
+        if release_count > 0:
+            # Match only low-frequency RGB statistics at the release boundary.
+            # The correction fades out while every generated frame keeps its own
+            # pose and detail, avoiding a frozen-image crossfade.
+            # A short average is more stable than using only the final carry
+            # frame, which may contain motion blur or a lighting outlier.
+            target = prefix[-min(4, prefix.shape[0]):].float()
+            dims = (0, 1, 2)
+            target_mean = target.mean(dim=dims, keepdim=True)
+            target_std = target.std(dim=dims, keepdim=True).clamp_min(1e-4)
+
+            for frame_index in range(release_count):
+                frame = suffix[frame_index:frame_index + 1].float()
+                source_mean = frame.mean(dim=dims, keepdim=True)
+                source_std = frame.std(dim=dims, keepdim=True).clamp_min(1e-4)
+                gain = (target_std / source_std).clamp(0.80, 1.25)
+                offset = (target_mean - source_mean * gain).clamp(-0.15, 0.15)
+                corrected = frame * gain + offset
+
+                # Smoothstep prevents a visible change in correction strength at
+                # either end of the release interval.
+                progress = frame_index / max(1, release_count - 1)
+                amount = 1.0 - progress * progress * (3.0 - 2.0 * progress)
+                suffix[frame_index:frame_index + 1] = torch.lerp(
+                    frame,
+                    corrected,
+                    amount,
+                ).clamp(0.0, 1.0).to(suffix.dtype)
+
+        return (torch.cat((prefix, suffix), dim=0),)
+
+
+def merge_videos(video_paths: list, output_path: str, target_fps: float = None,
+                 source_audio_path: str = None, total_frames: int = None,
+                 source_fps: float = None) -> bool:
     import subprocess, tempfile
     if not video_paths:
         return False
+
+    replace_audio = bool(source_audio_path and os.path.isfile(source_audio_path)
+                         and source_fps and source_fps > 0
+                         and total_frames and total_frames > 0)
+    concat_output = tempfile.mktemp(suffix=".mp4") if replace_audio else output_path
+    list_path = None
+    converted = []
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False, encoding="utf-8") as f:
             for p in video_paths:
                 f.write("file " + repr(p) + "\n")
             list_path = f.name
+
         if target_fps and target_fps > 0:
-            import tempfile as _tf
-            converted = []
             fps_str = f"{target_fps:.6f}".rstrip("0").rstrip(".")
             for vp in video_paths:
-                tmp = _tf.mktemp(suffix=".mp4")
+                tmp = tempfile.mktemp(suffix=".mp4")
                 cv_cmd = ["ffmpeg", "-y", "-i", vp,
                           "-r", fps_str,
                           "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                          "-c:a", "copy",
-                          tmp]
+                          "-c:a", "copy", tmp]
                 r2 = subprocess.run(cv_cmd, capture_output=True, text=True)
-                if r2.returncode == 0:
-                    converted.append(tmp)
-                else:
-                    converted.append(vp)
+                converted.append(tmp if r2.returncode == 0 else vp)
             with open(list_path, "w", encoding="utf-8") as lf:
                 for p in converted:
                     lf.write("file " + repr(p) + "\n")
-            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                   "-i", list_path, "-c", "copy", output_path]
-        else:
-            converted = []
-            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                   "-i", list_path, "-c", "copy", output_path]
+
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+               "-i", list_path, "-c", "copy", concat_output]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        os.unlink(list_path)
-        for _tmp in (converted if "converted" in dir() else []):
-            try:
-                if _tmp not in video_paths and os.path.exists(_tmp):
-                    os.unlink(_tmp)
-            except Exception:
-                pass
-        if result.returncode == 0:
+        if result.returncode != 0:
+            print(f"[SQR] ffmpeg concat error: {result.stderr[-300:]}")
+            return False
+
+        if not replace_audio:
             return True
-        print(f"[SQR] ffmpeg 错误: {result.stderr[-300:]}")
+
+        duration = total_frames / source_fps
+        remux_cmd = [
+            "ffmpeg", "-y", "-i", concat_output, "-i", source_audio_path,
+            "-map", "0:v:0", "-map", "1:a:0?",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-t", f"{duration:.9f}", "-movflags", "+faststart", output_path,
+        ]
+        remux_result = subprocess.run(remux_cmd, capture_output=True, text=True)
+        if remux_result.returncode == 0:
+            return True
+        print(f"[SQR] ffmpeg audio remux error: {remux_result.stderr[-300:]}")
         return False
     except FileNotFoundError:
-        print("[SQR] ✗ 未找到 ffmpeg，请确认系统已安装 ffmpeg 并在 PATH 中")
+        print("[SQR] ffmpeg executable was not found")
         return False
     except Exception as e:
-        print(f"[SQR] ✗ 合并异常: {e}")
+        print(f"[SQR] merge error: {e}")
         return False
+    finally:
+        for temp_path in [list_path, concat_output if replace_audio else None]:
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except Exception:
+                pass
+        for temp_path in converted:
+            try:
+                if temp_path not in video_paths and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except Exception:
+                pass
 
 
 class SegmentQueueRunner:
@@ -815,11 +990,15 @@ class SegmentQueueRunner:
             _sqr_log(unique_id, f"[SQR] ⚠ 无法获取音频文件名")
 
         image_src_node = None
+        latent_src_node = None
         if vc_nid and vc_nid in base_prompt:
             img_input = base_prompt[vc_nid]["inputs"].get("images")
             if isinstance(img_input, list) and len(img_input) == 2:
                 image_src_node = img_input
                 print(f"[SQR] 图像来源: {image_src_node}")
+                latent_src_node = find_latent_source_for_images(base_prompt, image_src_node)
+                if latent_src_node:
+                    print(f"[SQR] latent来源: {latent_src_node}")
 
         pre_segment_paths = [p.strip() for p in sqr_pre_segments.split(",")
                              if p.strip() and os.path.isfile(p.strip())] \
@@ -832,6 +1011,7 @@ class SegmentQueueRunner:
         def submit_all():
             last_video_path   = manual_video_path
             last_video_frames = manual_video_frames
+            last_latent_name  = None
             segment_output_paths = []
             sqr_cut_cleanup = []
             sqr_cut_paths   = []
@@ -867,11 +1047,16 @@ class SegmentQueueRunner:
                 transition_supported, _ae_class_type = _sqr_node_supports_transition(wf, ae_nid)
                 transition_frames = _sqr_transition_frame_count(_ae_class_type)
                 transition_added_frames = _sqr_transition_added_frames(_ae_class_type)
-                force_direct_segment_merge = (not transition_enabled) or (not transition_supported)
-                use_transition = last_video_path is not None and transition_enabled and transition_supported
-                if force_direct_segment_merge:
-                    use_transition = False
-                log(f"  过渡调试: enabled={transition_enabled} supported={transition_supported} class={_ae_class_type} last_video={os.path.basename(last_video_path) if last_video_path else 'None'} use_transition={use_transition}")
+                # Segment continuity must use the same carry/trim path whether the
+                # visible transition option is on or off. Falling back to direct
+                # merging here creates a different seam and can cause frame jumps.
+                force_direct_segment_merge = not transition_supported
+                _ae_inputs_for_mode = wf.get(ae_nid, {}).get("inputs", {}) if ae_nid in wf else {}
+                _sqr_replacement_mode = bool(_ae_inputs_for_mode.get("replacement_mode", False))
+                _latent_transition_name = None if _sqr_replacement_mode else last_latent_name
+                use_transition = (last_video_path is not None or _latent_transition_name is not None) and transition_supported
+                continuity_mode = "transition-on" if transition_enabled else "transition-off"
+                log(f"  接缝调试: mode={continuity_mode} supported={transition_supported} class={_ae_class_type} replacement={_sqr_replacement_mode} last_latent={last_latent_name or 'None'} last_video={os.path.basename(last_video_path) if last_video_path else 'None'} use_carry={use_transition}")
                 _transition_frames_for_load = 0
                 _video_skip = max(0, _actual_skip - _transition_frames_for_load)
                 _video_limit = limit + (_actual_skip - _video_skip)
@@ -911,32 +1096,70 @@ class SegmentQueueRunner:
                     wf[vc_nid]["inputs"]["audio"] = [node_id, 2]
                     log(f"  ⚠ 音频: 无法获取文件名，直接用LoadVideo音频(skip={skip}帧)")
 
+                transition_image_node = None
                 if ae_nid and ae_nid in wf:
                     if use_transition:
-                        t_skip = skip_frames_manual if skip_frames_manual >= 0 \
-                                 else (max(0, last_video_frames - transition_frames) if last_video_frames else 0)
-                        tv_tmp_id = f"sqr_tv_{seg_num}"
-                        tv_inputs = {
-                            "video":             os.path.basename(last_video_path),
-                            "force_rate":        0,
-                            "custom_width":      0,
-                            "custom_height":     0,
-                            "frame_load_cap":    transition_frames,
-                            "skip_first_frames": t_skip,
-                            "select_every_nth":  1,
-                            "format":            "AnimateDiff",
-                        }
-                        if width_src:
-                            tv_inputs["custom_width"]  = width_src
-                        if height_src:
-                            tv_inputs["custom_height"] = height_src
-                        wf[tv_tmp_id] = {"class_type": "VHS_LoadVideo", "inputs": tv_inputs}
                         wf[ae_nid]["inputs"].pop("continue_motion", None)
-                        wf[ae_nid]["inputs"]["transition_video"] = [tv_tmp_id, 0]
-                        log(f"  ✓ 过渡视频: {os.path.basename(last_video_path)} skip={t_skip} limit={transition_frames}")
-                        log(f"  过渡调试: 已注入节点 {tv_tmp_id} -> {ae_nid}.transition_video, inputs={tv_inputs}")
+                        if _latent_transition_name:
+                            tl_tmp_id = f"sqr_tlatent_{seg_num}"
+                            wf[tl_tmp_id] = {
+                                "class_type": "LoadLatent",
+                                "inputs": {"latent": _latent_transition_name},
+                            }
+                            wf[ae_nid]["inputs"]["transition_latent"] = [tl_tmp_id, 0]
+                            if last_video_path:
+                                t_skip = skip_frames_manual if skip_frames_manual >= 0 \
+                                         else (max(0, last_video_frames - transition_frames) if last_video_frames else 0)
+                                tv_tmp_id = f"sqr_tv_{seg_num}"
+                                tv_inputs = {
+                                    "video":             os.path.basename(last_video_path),
+                                    "force_rate":        0,
+                                    "custom_width":      0,
+                                    "custom_height":     0,
+                                    "frame_load_cap":    transition_frames,
+                                    "skip_first_frames": t_skip,
+                                    "select_every_nth":  1,
+                                    "format":            "AnimateDiff",
+                                }
+                                if width_src:
+                                    tv_inputs["custom_width"]  = width_src
+                                if height_src:
+                                    tv_inputs["custom_height"] = height_src
+                                wf[tv_tmp_id] = {"class_type": "VHS_LoadVideo", "inputs": tv_inputs}
+                                transition_image_node = [tv_tmp_id, 0]
+                                wf[ae_nid]["inputs"]["transition_video"] = [tv_tmp_id, 0]
+                                log(f"  ✓ 可见过渡前缀: {os.path.basename(last_video_path)} skip={t_skip} limit={transition_frames}")
+                            else:
+                                wf[ae_nid]["inputs"].pop("transition_video", None)
+                            log(f"  ✓ 过渡latent: {_latent_transition_name}（有效新增{transition_added_frames}帧）")
+                            log(f"  过渡调试: 已注入节点 {tl_tmp_id} -> {ae_nid}.transition_latent")
+                        elif last_video_path:
+                            t_skip = skip_frames_manual if skip_frames_manual >= 0 \
+                                     else (max(0, last_video_frames - transition_frames) if last_video_frames else 0)
+                            tv_tmp_id = f"sqr_tv_{seg_num}"
+                            tv_inputs = {
+                                "video":             os.path.basename(last_video_path),
+                                "force_rate":        0,
+                                "custom_width":      0,
+                                "custom_height":     0,
+                                "frame_load_cap":    transition_frames,
+                                "skip_first_frames": t_skip,
+                                "select_every_nth":  1,
+                                "format":            "AnimateDiff",
+                            }
+                            if width_src:
+                                tv_inputs["custom_width"]  = width_src
+                            if height_src:
+                                tv_inputs["custom_height"] = height_src
+                            wf[tv_tmp_id] = {"class_type": "VHS_LoadVideo", "inputs": tv_inputs}
+                            transition_image_node = [tv_tmp_id, 0]
+                            wf[ae_nid]["inputs"]["transition_video"] = [tv_tmp_id, 0]
+                            wf[ae_nid]["inputs"].pop("transition_latent", None)
+                            log(f"  ✓ 过渡视频: {os.path.basename(last_video_path)} skip={t_skip} limit={transition_frames}")
+                            log(f"  过渡调试: 已注入节点 {tv_tmp_id} -> {ae_nid}.transition_video, inputs={tv_inputs}")
                     else:
                         wf[ae_nid]["inputs"].pop("transition_video", None)
+                        wf[ae_nid]["inputs"].pop("transition_latent", None)
                         wf[ae_nid]["inputs"].pop("continue_motion", None)
                         log(f"  首段无过渡")
 
@@ -969,6 +1192,21 @@ class SegmentQueueRunner:
                 total_raw = limit + (transition_added_frames if use_transition else 0)
 
                 image_src = image_src_node
+                if use_transition and transition_image_node is not None:
+                    prefix_start = 1 if _ae_class_type == "SQRSCAIL2TransitionToVideo" else 0
+                    prefix_node = f"sqr_prefix_{seg_num}"
+                    wf[prefix_node] = {
+                        "class_type": "SQRReplaceBatchPrefix",
+                        "inputs": {
+                            "images": image_src,
+                            "prefix_images": transition_image_node,
+                            "prefix_length": transition_added_frames,
+                            "prefix_start": prefix_start,
+                            "color_release_frames": 20,
+                        },
+                    }
+                    image_src = [prefix_node, 0]
+                    log(f"  Color continuity: restored {transition_added_frames} carry frames from source offset {prefix_start}, then released per-frame color correction over 20 frames")
                 if force_direct_segment_merge:
                     trim_len = max(1, min(limit, max(0, total_frames - _actual_skip)))
                     trim_start = max(0, limit - trim_len)
@@ -1059,12 +1297,24 @@ class SegmentQueueRunner:
                                       if _subfolder_prefix else folder_paths.get_output_directory()
                     sqr_cut_cleanup.append((_cut_search_dir, _cut_file_prefix))
 
+                latent_save_id = None
+                if latent_src_node:
+                    latent_save_id = f"sqr_save_latent_{seg_num}"
+                    wf[latent_save_id] = {
+                        "class_type": "SaveLatent",
+                        "inputs": {
+                            "samples": latent_src_node,
+                            "filename_prefix": f"latents/sqr_latent_{run_stamp}_seg{seg_num}",
+                        },
+                    }
+                    log(f"  ✓ 已启用latent接力保存: {latent_save_id}")
+
                 if unique_id and unique_id in wf:
                     del wf[unique_id]
 
                 if ae_nid and ae_nid in wf:
                     _ae_inputs_debug = wf[ae_nid].get("inputs", {})
-                    log(f"  过渡调试: 提交前 {ae_nid} inputs含transition={_ae_inputs_debug.get('transition_video')} continue_motion={_ae_inputs_debug.get('continue_motion')} length={_ae_inputs_debug.get('length')} video_frame_offset={_ae_inputs_debug.get('video_frame_offset')}")
+                    log(f"  过渡调试: 提交前 {ae_nid} transition_video={_ae_inputs_debug.get('transition_video')} transition_latent={_ae_inputs_debug.get('transition_latent')} continue_motion={_ae_inputs_debug.get('continue_motion')} length={_ae_inputs_debug.get('length')} video_frame_offset={_ae_inputs_debug.get('video_frame_offset')}")
                 log(f"  → 提交中...")
                 try:
                     pid = queue_prompt(wf, client_id=_client_id)
@@ -1096,6 +1346,7 @@ class SegmentQueueRunner:
                                 "total_segs":             total_segs,
                                 "next_seg":               seg_num + 1,
                                 "transition_video":       _trans_fname,
+                                "transition_latent":      last_latent_name or "",
                                 "ref_images":             ref_images_list,
                                 "segments":               segments,
                                 "ref_video":              _ref_video_params.get("video", ""),
@@ -1123,6 +1374,15 @@ class SegmentQueueRunner:
                                 log(f"  ⚠ 未找到裁切输出视频")
 
                         vpath, vframes = get_output_video_info(pid, vc_nid, logger=log) if vc_nid else (None, None)
+                        if latent_save_id:
+                            lpath = get_output_latent_info(pid, latent_save_id, logger=log)
+                            lname = _sqr_copy_latent_into_input(lpath, unique_id=unique_id, seg_num=seg_num) if lpath else None
+                            if lname:
+                                last_latent_name = lname
+                                log(f"  ✓ latent接力已准备: {lname}")
+                            else:
+                                last_latent_name = None
+                                log(f"  ⚠ latent接力保存失败，下一段将退回视频过渡")
                         if not vpath:
                             log(f"  ⚠ 完整视频获取失败，下段过渡将跳过")
                         if vpath:
@@ -1166,8 +1426,16 @@ class SegmentQueueRunner:
                 merged_fname = f"sqr_merged_{run_stamp}.mp4"
                 merged_path  = _sqr_unique_filepath(os.path.join(output_dir, _sub + merged_fname))
                 merged_fname = os.path.basename(merged_path)
+                source_audio_path = _sqr_resolve_media_path(audio_filename)
+                if source_audio_path:
+                    log(f"Final audio: full source track {os.path.basename(source_audio_path)}, target={total_frames} frames")
+                else:
+                    log("Final audio: source media not found; keeping segmented audio")
                 if merge_videos(segment_output_paths, merged_path,
-                               target_fps=frame_rate if pre_segment_paths else None):
+                               target_fps=frame_rate if pre_segment_paths else None,
+                               source_audio_path=source_audio_path,
+                               total_frames=total_frames,
+                               source_fps=frame_rate):
                     log(f"✓ 合并完成: {_sub + merged_fname}")
                 else:
                     log(f"✗ 合并失败，请手动拼接各段视频")
@@ -1249,8 +1517,14 @@ class SegmentQueueRunner:
         return {}
 
 
-NODE_CLASS_MAPPINGS        = {"SegmentQueueRunner": SegmentQueueRunner}
-NODE_DISPLAY_NAME_MAPPINGS = {"SegmentQueueRunner": "WanAni SQR"}
+NODE_CLASS_MAPPINGS = {
+    "SegmentQueueRunner": SegmentQueueRunner,
+    "SQRReplaceBatchPrefix": SQRReplaceBatchPrefix,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "SegmentQueueRunner": "WanAni SQR",
+    "SQRReplaceBatchPrefix": "SQR Replace Batch Prefix",
+}
 
 
 # ── 后端 API ─────────────────────────────────────────────────────

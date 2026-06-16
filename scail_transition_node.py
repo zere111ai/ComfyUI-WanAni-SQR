@@ -8,8 +8,10 @@ import node_helpers
 
 
 log = logging.getLogger(__name__)
-TRANSITION_FRAMES = 33
+TRANSITION_FRAMES = 17
 TRANSITION_ADDED_FRAMES = TRANSITION_FRAMES - 1
+TRANSITION_LATENT_FRAMES = ((TRANSITION_FRAMES - 1) // 4) + 1
+TRANSITION_LOCKED_LATENT_FRAMES = TRANSITION_ADDED_FRAMES // 4
 
 
 def _shape(value):
@@ -85,6 +87,7 @@ class SQRSCAIL2TransitionToVideo:
                 "clip_vision_output": ("CLIP_VISION_OUTPUT",),
                 "previous_frames": ("IMAGE",),
                 "transition_video": ("IMAGE",),
+                "transition_latent": ("LATENT",),
             },
         }
 
@@ -98,22 +101,46 @@ class SQRSCAIL2TransitionToVideo:
                 pose_strength, pose_start, pose_end, video_frame_offset,
                 previous_frame_count, replacement_mode=False, pose_video=None,
                 pose_video_mask=None, reference_image=None, reference_image_mask=None,
-                clip_vision_output=None, previous_frames=None, transition_video=None):
+                clip_vision_output=None, previous_frames=None, transition_video=None,
+                transition_latent=None):
         original_length = length
-        transition_enabled = transition_video is not None and transition_video.shape[0] > 0
+        transition_latent_samples = None
+        if transition_latent is not None:
+            transition_latent_samples = transition_latent.get("samples")
+            if transition_latent_samples is not None and transition_latent_samples.shape[2] == 0:
+                transition_latent_samples = None
+        transition_enabled = (
+            transition_latent_samples is not None
+            or (transition_video is not None and transition_video.shape[0] > 0)
+        )
+        transition_from_latent = transition_latent_samples is not None
         transition_count = TRANSITION_FRAMES if transition_enabled else 0
         log.info(
-            "[SQR-SCAIL-TRANS] start transition=%s strategy=%s size=%sx%s length=%s offset=%s pose=%s mask=%s previous=%s transition_video=%s",
-            transition_enabled, "replacement" if replacement_mode else "animation",
+            "[SQR-SCAIL-TRANS] start transition=%s source=%s strategy=%s size=%sx%s length=%s offset=%s pose=%s mask=%s previous=%s transition_video=%s transition_latent=%s",
+            transition_enabled,
+            "latent" if transition_from_latent else "video",
+            "replacement" if replacement_mode else "animation",
             width, height, original_length, video_frame_offset,
             _shape(pose_video), _shape(pose_video_mask), _shape(previous_frames), _shape(transition_video),
+            _shape(transition_latent_samples),
         )
 
         prev_trimmed = None
-        if transition_enabled:
+        prev_latent_trimmed = None
+        if transition_from_latent:
+            prev_latent_trimmed = transition_latent_samples[:, :, -TRANSITION_LATENT_FRAMES:]
+            length += TRANSITION_ADDED_FRAMES
+            log.info(
+                "[SQR-SCAIL-TRANS] latent transition: source_latents=%s carry_latents=%s locked_latents=%s locked_output_frames=%s",
+                transition_latent_samples.shape[2],
+                prev_latent_trimmed.shape[2],
+                TRANSITION_LOCKED_LATENT_FRAMES,
+                TRANSITION_ADDED_FRAMES,
+            )
+        elif transition_enabled:
             if replacement_mode:
                 # SCAIL-2 replacement was trained with a short previous-frame
-                # anchor (normally five frames). Keeping all 32 old RGB frames
+                # anchor (normally five frames). Keeping the full old RGB carry
                 # conflicts with the white-background replacement mask and can
                 # preserve the old person or destabilize the background.
                 replacement_anchor_count = min(
@@ -136,9 +163,9 @@ class SQRSCAIL2TransitionToVideo:
                     transition_count,
                     TRANSITION_ADDED_FRAMES,
                 )
-            # Wan VAE uses a causal 4N+1 timeline. A 33-frame anchor has nine
+            # Wan VAE uses a causal 4N+1 timeline. A 17-frame anchor has five
             # latent frames and shares its causal boundary frame with the current
-            # segment, so it adds 32 output frames rather than 33.
+            # segment, so it adds 16 output frames rather than 17.
             length += TRANSITION_ADDED_FRAMES
         elif previous_frames is not None and previous_frames.shape[0] > 0:
             prev_trimmed = previous_frames[-previous_frame_count:]
@@ -152,7 +179,7 @@ class SQRSCAIL2TransitionToVideo:
             # Match SQR WanAnimate's proven timeline: the RGB carry remains the
             # moving previous segment, while current segment geometry conditions
             # are present throughout the carry. This removes the pose/mask switch
-            # at frame 33 without replacing the carried RGB with a still frame.
+            # at the release boundary without replacing the carried RGB with a still frame.
             pose_video = _prepend_first_frame(pose_video, TRANSITION_ADDED_FRAMES)
             pose_video_mask = _prepend_first_frame(pose_video_mask, TRANSITION_ADDED_FRAMES)
             log.info(
@@ -240,26 +267,32 @@ class SQRSCAIL2TransitionToVideo:
             negative = node_helpers.conditioning_set_values(negative, {"ref_mask_28ch": ref_mask_all})
 
         locked_latent_frames = 0
-        if prev_trimmed is not None:
-            previous = comfy.utils.common_upscale(prev_trimmed.movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
-            previous_latent = vae.encode(previous[:, :, :, :3])
+        if prev_trimmed is not None or prev_latent_trimmed is not None:
+            if prev_latent_trimmed is not None:
+                previous_latent = prev_latent_trimmed.to(latent.device)
+            else:
+                previous = comfy.utils.common_upscale(prev_trimmed.movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
+                previous_latent = vae.encode(previous[:, :, :, :3])
             copied_latent_frames = min(previous_latent.shape[2], latent.shape[2])
             latent[:, :, :copied_latent_frames] = previous_latent[:, :, :copied_latent_frames].to(latent.dtype)
             noise_mask = torch.ones((1, 1, latent.shape[2], latent.shape[-2], latent.shape[-1]), device=latent.device, dtype=latent.dtype)
             if transition_enabled and not replacement_mode:
-                # Match SQR WanAnimate exactly at the release boundary: 33 source
-                # frames provide a complete causal VAE encode, but only the first
-                # 32 output frames (8 latent groups) are held. The ninth latent,
-                # beginning at frame 33, is fully denoised with the current pose.
+                # Match SQR WanAnimate at the release boundary: 17 source frames
+                # provide a complete causal VAE encode, but only the first
+                # 16 output frames (4 latent groups) are held. The fifth latent,
+                # beginning at frame 17, is fully denoised with the current pose.
                 locked_latent_frames = min(
-                    TRANSITION_ADDED_FRAMES // 4,
+                    TRANSITION_LOCKED_LATENT_FRAMES,
                     copied_latent_frames,
                 )
                 noise_mask[:, :, :locked_latent_frames] = 0.0
+                if copied_latent_frames > locked_latent_frames:
+                    release_index = locked_latent_frames
+                    noise_mask[:, :, release_index:release_index + 1] = 0.45
                 log.info(
                     "[SQR-SCAIL-TRANS] WanAnimate-aligned boundary: "
                     "copied_latents=%s locked_latents=%s locked_output_frames=%s; "
-                    "latent_index=%s (frame 33 onward) noise_mask=1.0",
+                    "latent_index=%s (frame 17 onward) noise_mask=0.45 then 1.0",
                     copied_latent_frames,
                     locked_latent_frames,
                     locked_latent_frames * 4,
