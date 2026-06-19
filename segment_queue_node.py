@@ -1064,7 +1064,10 @@ class SegmentQueueRunner:
                 force_direct_segment_merge = not transition_supported
                 _ae_inputs_for_mode = wf.get(ae_nid, {}).get("inputs", {}) if ae_nid in wf else {}
                 _sqr_replacement_mode = bool(_ae_inputs_for_mode.get("replacement_mode", False))
-                _latent_transition_name = None if _sqr_replacement_mode else last_latent_name
+                _supports_latent_transition = _ae_class_type == "SQRSCAIL2TransitionToVideo"
+                _latent_transition_name = (
+                    None if (_sqr_replacement_mode or not _supports_latent_transition) else last_latent_name
+                )
                 use_transition = (last_video_path is not None or _latent_transition_name is not None) and transition_supported
                 continuity_mode = "transition-on" if transition_enabled else "transition-off"
                 log(f"  接缝调试: mode={continuity_mode} supported={transition_supported} class={_ae_class_type} replacement={_sqr_replacement_mode} last_latent={last_latent_name or 'None'} last_video={os.path.basename(last_video_path) if last_video_path else 'None'} use_carry={use_transition}")
@@ -1338,7 +1341,7 @@ class SegmentQueueRunner:
                     sqr_cut_cleanup.append((_cut_search_dir, _cut_file_prefix))
 
                 latent_save_id = None
-                if latent_src_node:
+                if latent_src_node and _supports_latent_transition:
                     latent_save_id = f"sqr_save_latent_{seg_num}"
                     wf[latent_save_id] = {
                         "class_type": "SaveLatent",
@@ -1353,6 +1356,8 @@ class SegmentQueueRunner:
                     del wf[unique_id]
 
                 if ae_nid and ae_nid in wf:
+                    if not _supports_latent_transition:
+                        wf[ae_nid].get("inputs", {}).pop("transition_latent", None)
                     _ae_inputs_debug = wf[ae_nid].get("inputs", {})
                     log(f"  过渡调试: 提交前 {ae_nid} transition_video={_ae_inputs_debug.get('transition_video')} transition_latent={_ae_inputs_debug.get('transition_latent')} continue_motion={_ae_inputs_debug.get('continue_motion')} length={_ae_inputs_debug.get('length')} video_frame_offset={_ae_inputs_debug.get('video_frame_offset')}")
                 log(f"  → 提交中...")
