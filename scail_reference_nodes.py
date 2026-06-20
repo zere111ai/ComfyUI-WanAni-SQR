@@ -153,6 +153,32 @@ def _center_crop_to_size(image, crop_height, crop_width):
     return image[:, y0:y0 + crop_height, x0:x0 + crop_width, :]
 
 
+def _center_pad_to_size(image, target_height, target_width, fill=1.0):
+    _, height, width, channels = image.shape
+    target_height = max(height, int(target_height))
+    target_width = max(width, int(target_width))
+    if height == target_height and width == target_width:
+        return image
+    canvas = torch.full(
+        (image.shape[0], target_height, target_width, channels),
+        fill,
+        device=image.device,
+        dtype=image.dtype,
+    )
+    y0 = max(0, (target_height - height) // 2)
+    x0 = max(0, (target_width - width) // 2)
+    canvas[:, y0:y0 + height, x0:x0 + width, :] = image
+    return canvas
+
+
+def _match_and_fill_refs(refs):
+    if not refs:
+        return refs
+    target_height = max(img.shape[1] for img in refs)
+    target_width = max(img.shape[2] for img in refs)
+    return [_center_pad_to_size(img, target_height, target_width, fill=1.0) for img in refs]
+
+
 class LHResolutionSetting:
     RESOLUTIONS = {
         "1:1 480": (480, 480),
@@ -260,6 +286,7 @@ class SQRScail2ReferenceBatchStack:
                 "width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8, "forceInput": True}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8, "forceInput": True}),
                 "crop_mode": (["keep", "crop_to_video_aspect"], {"default": "keep"}),
+                "match_and_fill": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "image_2": ("IMAGE",),
@@ -275,10 +302,12 @@ class SQRScail2ReferenceBatchStack:
     FUNCTION = "execute"
     CATEGORY = "SQR/SCAIL2"
 
-    def execute(self, image_1, width, height, crop_mode="keep", image_2=None, image_3=None,
+    def execute(self, image_1, width, height, crop_mode="keep", match_and_fill=True, image_2=None, image_3=None,
                 image_4=None, image_5=None, image_6=None):
         images = [img for img in (image_1, image_2, image_3, image_4, image_5, image_6) if img is not None and img.shape[0] > 0]
         refs = [img[:1, :, :, :3] for img in images]
+        if match_and_fill and len(refs) > 1:
+            refs = _match_and_fill_refs(refs)
         if crop_mode == "crop_to_video_aspect":
             refs = [_center_crop_to_aspect(img, width, height) for img in refs]
             target_ratio = max(1, int(width)) / max(1, int(height))

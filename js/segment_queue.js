@@ -7,13 +7,21 @@ function sqrThumbUrl(path) {
     return THUMB_URL + encodeURIComponent(path) + sep + "_ts=" + Date.now() + "_r=" + Math.random().toString(36).slice(2, 8);
 }
 
-function sqrParseRefPaths(value) {
+function sqrParseRefGroups(value) {
     const raw = String(value || "").trim();
     if (!raw) return [];
     if (raw.startsWith("[")) {
         try {
             const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) return parsed.map(v => String(v).trim()).filter(Boolean);
+            if (Array.isArray(parsed)) {
+                if (parsed.some(v => Array.isArray(v))) {
+                    return parsed.map(group => Array.isArray(group) ? group : [group])
+                        .map(group => group.map(v => String(v).trim()).filter(Boolean).slice(0, 5))
+                        .filter(group => group.length);
+                }
+                const flat = parsed.map(v => String(v).trim()).filter(Boolean);
+                return flat.length ? [flat] : [];
+            }
         } catch (e) {
             console.warn("[SQR] Failed to parse reference image JSON; using legacy format:", e);
         }
@@ -21,12 +29,28 @@ function sqrParseRefPaths(value) {
     const legacyMatches = [...raw.matchAll(/(?:^|,)\s*(.*?\.(?:png|jpe?g|webp|bmp))(?=,|$)/gi)]
         .map(match => match[1]?.trim())
         .filter(Boolean);
-    if (legacyMatches.length) return legacyMatches;
-    return raw.split(",").map(v => v.trim()).filter(Boolean);
+    const flat = legacyMatches.length ? legacyMatches : raw.split(",").map(v => v.trim()).filter(Boolean);
+    return flat.length ? [flat] : [];
+}
+
+function sqrFlattenRefGroups(groups) {
+    return (groups || []).flatMap(group => Array.isArray(group) ? group : [group]).map(v => String(v).trim()).filter(Boolean);
+}
+
+function sqrParseRefPaths(value) {
+    return sqrFlattenRefGroups(sqrParseRefGroups(value));
+}
+
+function sqrStoreRefGroups(groups) {
+    const cleaned = (groups || [])
+        .map(group => (Array.isArray(group) ? group : [group]).map(v => String(v).trim()).filter(Boolean).slice(0, 5))
+        .filter(group => group.length);
+    if (cleaned.length <= 1) return JSON.stringify(cleaned[0] || []);
+    return JSON.stringify(cleaned);
 }
 
 function sqrStoreRefPaths(paths) {
-    return JSON.stringify((paths || []).map(v => String(v).trim()).filter(Boolean));
+    return sqrStoreRefGroups([(paths || []).map(v => String(v).trim()).filter(Boolean)]);
 }
 
 // ── Remote environment detection ─────────────────────────────────
@@ -398,7 +422,7 @@ app.registerExtension({
             const r = origCreated ? origCreated.apply(this, arguments) : undefined;
             const node = this;
             const getW = name => node.widgets?.find(w => w.name === name);
-            if (node.size) node.size[0] = Math.max(node.size[0] || 0, 380);
+            if (node.size) node.size[0] = Math.max(node.size[0] || 0, 520);
 
             const sqrKeys = ["参考图节点ID","参考视频节点ID","输出节点ID","动作嵌入节点ID","分段参考图","续跑视频路径"];
             const resumeToggle = getW("启用续跑");
@@ -430,6 +454,13 @@ app.registerExtension({
                 });
                 multiRefW.serialize = true;
             }
+            let replacementW = getW("replacement_enabled");
+            if (!replacementW) {
+                replacementW = node.addWidget("toggle", "replacement_enabled", false, () => {
+                    node.setDirtyCanvas?.(true, true);
+                });
+                replacementW.serialize = true;
+            }
             let transitionW = getW("启用过渡效果");
             if (!transitionW) {
                 transitionW = node.addWidget("toggle", "启用过渡效果", false, () => {
@@ -451,6 +482,10 @@ app.registerExtension({
             if (multiRefW) {
                 multiRefW.computeSize = () => [0, -4];
                 multiRefW.draw = () => {};
+            }
+            if (replacementW) {
+                replacementW.computeSize = () => [0, -4];
+                replacementW.draw = () => {};
             }
 
             function _sqrApplySegMax() {
@@ -501,6 +536,18 @@ app.registerExtension({
             }
 
             const SQR_NODE_ID_KEYS = ["参考图节点ID", "参考视频节点ID", "输出节点ID", "动作嵌入节点ID"];
+            const getSqrStateWidgets = () => {
+                const names = new Set([...sqrKeys, "sqr_save_png", "sqr_frame_offset", "sqr_pre_segments"]);
+                const widgets = [];
+                for (const name of names) {
+                    const w = getW(name);
+                    if (w) widgets.push(w);
+                }
+                for (const w of [transitionW, multiRefW, replacementW, execW, resumeToggle, segW, startW]) {
+                    if (w && !widgets.includes(w)) widgets.push(w);
+                }
+                return widgets;
+            };
             const SQR_NODE_ID_TYPES = {
                 "参考图节点ID": ["LoadImage", "WanSQRMultiReference", "SQRScail2ReferenceBatchStack"],
                 "参考视频节点ID": ["VHS_LoadVideo"],
@@ -529,6 +576,45 @@ app.registerExtension({
                 for (const key of SQR_NODE_ID_KEYS) store[key] = String(getW(key)?.value || "").trim();
                 return store;
             };
+            const ensureStateStore = () => {
+                node.properties ||= {};
+                node.properties.sqr_state ||= {};
+                return node.properties.sqr_state;
+            };
+            const persistSqrState = () => {
+                const state = ensureStateStore();
+                for (const w of getSqrStateWidgets()) {
+                    if (w?.name) state[w.name] = w.value;
+                }
+                state.version = 1;
+                state.node_id = String(node.id ?? "");
+                state.updated_at = Date.now();
+                return state;
+            };
+            const restoreSqrState = source => {
+                if (!source || typeof source !== "object") return false;
+                let restored = false;
+                for (const [name, value] of Object.entries(source)) {
+                    const w = getW(name);
+                    if (!w) continue;
+                    w.value = value;
+                    restored = true;
+                }
+                if (restored) {
+                    node.properties ||= {};
+                    node.properties.sqr_state = { ...source };
+                    const resumePathW = getW(sqrKeys[5]);
+                    const resumePath = String(resumePathW?.value || "").trim();
+                    const rtw = resumeToggle;
+                    if (rtw) rtw.value = !!resumePath && rtw.value !== false;
+                    if (multiRefW) _sqrSyncMultiRefIdentityMode(multiRefW.value);
+                    if (replacementW) _sqrSyncReplacementMode(replacementW.value);
+                    const tw = node.widgets?.find(w => w.name === "_sqr_ref_thumbs");
+                    if (tw) tw.syncPaths?.();
+                    node.setDirtyCanvas?.(true, true);
+                }
+                return restored;
+            };
             const restoreNodeIds = source => {
                 if (!source || typeof source !== "object") return false;
                 let restored = false;
@@ -551,14 +637,17 @@ app.registerExtension({
                 const w = getW(k);
                 if (w) w.value = v;
                 if (SQR_NODE_ID_KEYS.includes(k)) ensureNodeIdStore()[k] = String(v ?? "").trim();
+                persistSqrState();
             };
 
             const _origSqrSerialize = node.onSerialize;
             node.onSerialize = function(data) {
                 if (_origSqrSerialize) _origSqrSerialize.call(this, data);
                 const ids = persistNodeIds();
+                const state = persistSqrState();
                 data.properties ||= {};
                 data.properties.sqr_node_ids = { ...ids };
+                data.properties.sqr_state = { ...state };
             };
 
             const _origSqrConfigure = node.onConfigure;
@@ -566,6 +655,8 @@ app.registerExtension({
                 const result = _origSqrConfigure ? _origSqrConfigure.call(this, data) : undefined;
                 const positional = Object.fromEntries(SQR_NODE_ID_KEYS.map(key => [key, String(getW(key)?.value || "").trim()]));
                 const saved = data?.properties?.sqr_node_ids || this.properties?.sqr_node_ids;
+                const savedState = data?.properties?.sqr_state || this.properties?.sqr_state;
+                restoreSqrState(savedState);
                 setTimeout(() => {
                     const repaired = {};
                     for (const key of SQR_NODE_ID_KEYS) {
@@ -579,11 +670,13 @@ app.registerExtension({
                     }
                     restoreNodeIds(repaired);
                     persistNodeIds();
+                    persistSqrState();
                 }, 250);
                 return result;
             };
 
             if (node.properties?.sqr_node_ids) restoreNodeIds(node.properties.sqr_node_ids);
+            if (node.properties?.sqr_state) restoreSqrState(node.properties.sqr_state);
 
             const _SQR_PNG_KEY   = "sqr_save_png";
             const _SQR_SEGMAX_KEY = "sqr_seg_max";
@@ -774,6 +867,58 @@ app.registerExtension({
                 ctx.restore();
             }
 
+            function _sqrSetNodeInputValue(target, inputName, value) {
+                if (!target) return false;
+                const widget = target.widgets?.find(w => w.name === inputName);
+                if (widget) {
+                    widget.value = value;
+                    widget.callback?.(value);
+                }
+                target.inputs ||= {};
+                target.properties ||= target.properties || {};
+                if (target.widgets_values && widget) {
+                    const idx = target.widgets.indexOf(widget);
+                    if (idx >= 0) target.widgets_values[idx] = value;
+                }
+                target.setDirtyCanvas?.(true, true);
+                return !!widget;
+            }
+
+            function _sqrSyncReplacementMode(value) {
+                const enabled = !!value;
+                const graphNodes = app.graph?._nodes || [];
+                let changed = 0;
+                const aeId = Number.parseInt(String(getSqr(sqrKeys[3]) || "").trim(), 10);
+                const aeNode = Number.isFinite(aeId) ? app.graph?.getNodeById?.(aeId) : null;
+                if (aeNode?.comfyClass === "SQRSCAIL2TransitionToVideo" || aeNode?.type === "SQRSCAIL2TransitionToVideo") {
+                    if (_sqrSetNodeInputValue(aeNode, "replacement_mode", enabled)) changed++;
+                }
+                for (const gnode of graphNodes) {
+                    const cls = gnode?.comfyClass || gnode?.type;
+                    if (cls === "SQRScail2ColoredMaskAdvanced") {
+                        if (_sqrSetNodeInputValue(gnode, "replacement_mode", enabled)) changed++;
+                    } else if (cls === "SQRSCAIL2TransitionToVideo" && gnode !== aeNode) {
+                        if (_sqrSetNodeInputValue(gnode, "replacement_mode", enabled)) changed++;
+                    }
+                }
+                if (!changed) console.warn("[SQR] Replacement switch did not find SCAIL-2 replacement_mode widgets to sync.");
+                return changed;
+            }
+
+            function _sqrSyncMultiRefIdentityMode(value) {
+                const identityMode = value ? "single_person_multi_reference" : "multi_person";
+                const graphNodes = app.graph?._nodes || [];
+                let changed = 0;
+                for (const gnode of graphNodes) {
+                    const cls = gnode?.comfyClass || gnode?.type;
+                    if (cls === "SQRScail2ColoredMaskAdvanced") {
+                        if (_sqrSetNodeInputValue(gnode, "identity_mode", identityMode)) changed++;
+                    }
+                }
+                if (!changed) console.warn("[SQR] Multi Ref switch did not find SCAIL-2 identity_mode widgets to sync.");
+                return changed;
+            }
+
             const topBarWidget = {
                 name: "_sqr_topbar",
                 type: "sqr_topbar",
@@ -791,15 +936,17 @@ app.registerExtension({
                     _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
                     _sqrDrawTopButton(ctx, "log", rightX + actionW + idsW + gap * 2, topY, logW, h, "Log", false, { mode: "action", hitY: 4 });
 
-                    const toggleW = Math.max(72, Math.min(98, (width - actionW - idsW - logW - 54) / 3));
-                    const totalW = toggleW * 3 + gap * 2;
+                    const toggleW = Math.max(68, Math.min(92, (width - actionW - idsW - logW - 64) / 4));
+                    const totalW = toggleW * 4 + gap * 3;
                     const midX = Math.max(7, Math.min((width - totalW) / 2, rightX - totalW - 8));
                     const multiRefOn = !!multiRefW?.value;
+                    const replacementOn = !!replacementW?.value;
                     const transOn = !!transitionW?.value;
                     const execOn = !!execW?.value;
                     _sqrDrawTopButton(ctx, "multiref", midX, topY, toggleW, h, multiRefOn ? "Multi Ref ON" : "Multi Ref OFF", multiRefOn, { hitY: 4 });
-                    _sqrDrawTopButton(ctx, "transition", midX + toggleW + gap, topY, toggleW, h, transOn ? "Transition ON" : "Transition OFF", transOn, { hitY: 4 });
-                    _sqrDrawTopButton(ctx, "execute", midX + (toggleW + gap) * 2, topY, toggleW, h, execOn ? "Execute Mode" : "Preview Mode", execOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "replacement", midX + toggleW + gap, topY, toggleW, h, replacementOn ? "Replacement ON" : "Replacement OFF", replacementOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "transition", midX + (toggleW + gap) * 2, topY, toggleW, h, transOn ? "Transition ON" : "Transition OFF", transOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "execute", midX + (toggleW + gap) * 3, topY, toggleW, h, execOn ? "Execute Mode" : "Preview Mode", execOn, { hitY: 4 });
                 },
                 mouse(event, pos, nodeRef) {
                     if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
@@ -811,12 +958,21 @@ app.registerExtension({
                             if (key === "multiref" && multiRefW) {
                                 multiRefW.value = !multiRefW.value;
                                 multiRefW.callback?.(multiRefW.value);
+                                _sqrSyncMultiRefIdentityMode(multiRefW.value);
+                                persistSqrState();
+                            } else if (key === "replacement" && replacementW) {
+                                replacementW.value = !replacementW.value;
+                                replacementW.callback?.(replacementW.value);
+                                _sqrSyncReplacementMode(replacementW.value);
+                                persistSqrState();
                             } else if (key === "transition" && transitionW) {
                                 transitionW.value = !transitionW.value;
                                 transitionW.callback?.(transitionW.value);
+                                persistSqrState();
                             } else if (key === "execute" && execW) {
                                 execW.value = !execW.value;
                                 execW.callback?.(execW.value);
+                                persistSqrState();
                             } else if (key === "settings") {
                                 settingsBtn.callback?.();
                             } else if (key === "nodeids") {
@@ -987,6 +1143,7 @@ app.registerExtension({
                 if (fromW2) fromW2.value = 1;
                 const foW = getW("sqr_frame_offset"); if (foW) foW.value = -1;
                 resumeBtn.name = "Select Resume Video";
+                persistSqrState();
                 node.setDirtyCanvas?.(true, true);
                 setTimeout(() => {
                     resumeBtn.name = "Select Resume Video";
@@ -995,7 +1152,11 @@ app.registerExtension({
             };
             node._sqrClearVideo = _clearVideo;
 
-            { const w = getW("sqr_save_png"); if (w) w.value = String(node._sqrSettings.savePng ?? true); }
+            {
+                const w = getW("sqr_save_png");
+                const stateHasPng = Object.prototype.hasOwnProperty.call(node.properties?.sqr_state || {}, "sqr_save_png");
+                if (w && !stateHasPng) w.value = String(node._sqrSettings.savePng ?? true);
+            }
             for (const _hk of ["sqr_frame_offset", "sqr_pre_segments"]) {
                 const _hw = getW(_hk);
                 if (_hw) { _hw.computeSize = () => [0, -4]; _hw.draw = () => {}; }
@@ -1005,48 +1166,84 @@ app.registerExtension({
             // ── Reference image manager ──
             const showRefManager = (onConfirm) => {
                 document.getElementById("sqr-mgr-overlay")?.remove();
-                const paths = sqrParseRefPaths(getSqr("分段参考图"));
-                let dragIdx = null;
+                let groups = sqrParseRefGroups(getSqr(sqrKeys[4]));
+                if (!groups.length) groups = [[]];
+                let dragInfo = null;
                 const overlay = document.createElement("div");overlay.id = "sqr-mgr-overlay";Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"10001",background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center"});
-                const box = document.createElement("div");Object.assign(box.style,{background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#444)",borderRadius:"12px",padding:"18px 22px",width:"680px",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
+                const box = document.createElement("div");Object.assign(box.style,{background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#444)",borderRadius:"12px",padding:"18px 22px",width:"760px",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
                 const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
-                box.appendChild(mkDiv("Reference Images","font-size:14px;font-weight:600;"));
-                const grid = document.createElement("div");Object.assign(grid.style,{display:"flex",flexWrap:"wrap",gap:"8px",minHeight:"80px",maxHeight:"420px",overflowY:"auto",padding:"10px",border:"1px solid var(--border-color,#444)",borderRadius:"8px"});
-                function renderGrid() {
-                    grid.innerHTML = "";
-                    if (!paths.length) { grid.appendChild(mkDiv("(No reference images selected)","opacity:.4;font-size:13px;padding:8px;")); return; }
-                    grid.appendChild(mkDiv("Left-click to duplicate · drag to reorder · right-click to remove","font-size:11px;opacity:.5;width:100%;padding:2px 4px;"));
-                    paths.forEach((p, idx) => {
-                        const fname = p.split(/[/\\]/).pop();
-                        const cell = document.createElement("div");Object.assign(cell.style,{width:"100px",textAlign:"center",position:"relative",border:"2px solid var(--border-color,#555)",borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none"});cell.draggable = true;
-                        const badge = mkDiv(String(idx+1),"position:absolute;top:2px;left:2px;background:#3a9;color:#fff;border-radius:3px;padding:0 4px;font-size:10px;font-weight:bold;line-height:16px;z-index:1;");
-                        const img = new Image();img.src = sqrThumbUrl(p);Object.assign(img.style,{width:"92px",height:"92px",objectFit:"contain",display:"block",borderRadius:"4px",pointerEvents:"none"});
-                        const res = mkDiv("loading","font-size:9px;margin-top:2px;color:#8fd;opacity:.72;");
-                        img.onload = () => { res.textContent = `${img.naturalWidth}x${img.naturalHeight}`; };
-                        img.onerror = () => { res.textContent = "unknown"; };
-                        const lbl = mkDiv(fname.length>14?fname.slice(0,13)+"…":fname,"font-size:9px;margin-top:3px;word-break:break-all;opacity:.7;");lbl.title = p;
-                        cell.ondragstart=e=>{e.stopPropagation();dragIdx=idx;cell._sqrDragged=false;setTimeout(()=>cell.style.opacity=".35",0);};cell.ondragend=e=>{e.stopPropagation();cell.style.opacity="1";setTimeout(()=>{cell._sqrDragged=false;},0);};
-                        cell.ondragover=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="#4a9";};cell.ondragleave=()=>{cell.style.borderColor="var(--border-color,#555)";};
-                        cell.ondrop=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="var(--border-color,#555)";cell._sqrDragged=true;if(dragIdx!==null&&dragIdx!==idx){const[m]=paths.splice(dragIdx,1);paths.splice(idx,0,m);renderGrid();}};
-                        cell.onclick=e=>{e.stopPropagation();if(cell._sqrDragged){cell._sqrDragged=false;return;} paths.splice(idx+1,0,p);renderGrid();};
-                        cell.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();paths.splice(idx,1);renderGrid();};
-                        cell.append(badge,img,res,lbl);grid.appendChild(cell);
+                box.appendChild(mkDiv("Reference Image Groups","font-size:14px;font-weight:600;"));
+                box.appendChild(mkDiv("Multi Ref ON: segment 1 uses group 1, segment 2 uses group 2, and so on. Each group can contain up to 5 images.","font-size:11px;opacity:.55;line-height:1.45;"));
+                const wrap = document.createElement("div");Object.assign(wrap.style,{display:"flex",flexDirection:"column",gap:"10px",minHeight:"120px",maxHeight:"520px",overflowY:"auto",padding:"10px",border:"1px solid var(--border-color,#444)",borderRadius:"8px"});
+                const normalizeGroups = () => { groups = groups.map(g => (g || []).filter(Boolean).slice(0, 5)); if (!groups.length) groups = [[]]; };
+                function moveImage(gidx, idx, dir) {
+                    const target = gidx + dir;
+                    if (target < 0 || target >= groups.length) return;
+                    if ((groups[target] || []).length >= 5) { alert("Target group already has 5 images."); return; }
+                    const [img] = groups[gidx].splice(idx, 1);
+                    groups[target].push(img);
+                    renderGroups();
+                }
+                function renderGroups() {
+                    normalizeGroups();
+                    wrap.innerHTML = "";
+                    groups.forEach((group, gidx) => {
+                        const panel = document.createElement("div");Object.assign(panel.style,{border:"1px solid var(--border-color,#555)",borderRadius:"8px",padding:"8px",background:"rgba(255,255,255,0.025)"});
+                        const header = document.createElement("div");Object.assign(header.style,{display:"flex",alignItems:"center",gap:"8px",marginBottom:"8px"});
+                        header.appendChild(mkDiv(`Group ${gidx+1} - ${group.length}/5`,`font-size:12px;font-weight:700;color:#9fd;flex:1;`));
+                        const addBtn = document.createElement("button");addBtn.textContent="Add Images";addBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;";addBtn.onclick=async()=>{ const saved=await _sqrPickAndUploadImages(); for(const name of saved){ if(group.length>=5) break; if(!group.includes(name)) group.push(name); } renderGroups(); };
+                        const delBtn = document.createElement("button");delBtn.textContent="Remove Group";delBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;color:#f99;";delBtn.onclick=()=>{ if(groups.length<=1){ groups=[[]]; } else { groups.splice(gidx,1); } renderGroups(); };
+                        header.append(addBtn, delBtn); panel.appendChild(header);
+                        const grid = document.createElement("div");Object.assign(grid.style,{display:"flex",flexWrap:"wrap",gap:"8px",minHeight:"62px"});
+                        if (!group.length) grid.appendChild(mkDiv("Drop or add images for this segment group","opacity:.35;font-size:12px;padding:8px;"));
+                        group.forEach((path, idx) => {
+                            const fname = path.split(/[/\\]/).pop();
+                            const cell = document.createElement("div");Object.assign(cell.style,{width:"112px",textAlign:"center",position:"relative",border:"2px solid var(--border-color,#555)",borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none"});cell.draggable=true;
+                            const badge = mkDiv(`${gidx+1}.${idx+1}`,"position:absolute;top:2px;left:2px;background:#3a9;color:#fff;border-radius:3px;padding:0 4px;font-size:10px;font-weight:bold;line-height:16px;z-index:1;");
+                            const img = new Image();img.src=sqrThumbUrl(path);Object.assign(img.style,{width:"104px",height:"92px",objectFit:"contain",display:"block",borderRadius:"4px",pointerEvents:"none"});
+                            const res = mkDiv("loading","font-size:9px;margin-top:2px;color:#8fd;opacity:.72;");img.onload=()=>{res.textContent=`${img.naturalWidth}x${img.naturalHeight}`;};img.onerror=()=>{res.textContent="unknown";};
+                            const lbl = mkDiv(fname.length>16?fname.slice(0,15)+"...":fname,"font-size:9px;margin-top:3px;word-break:break-all;opacity:.7;");lbl.title=path;
+                            const tools=document.createElement("div");tools.style.cssText="display:flex;gap:3px;margin-top:4px;";
+                            const mkMini=(t,fn,disabled=false)=>{const b=document.createElement("button");b.textContent=t;b.disabled=disabled;b.style.cssText=`flex:1;font-size:9px;padding:2px;border-radius:4px;cursor:${disabled?"default":"pointer"};opacity:${disabled?".38":"1"};`;b.onclick=e=>{e.stopPropagation();if(!disabled)fn();};return b;};
+                            tools.append(mkMini("Prev",()=>moveImage(gidx,idx,-1),gidx<=0),mkMini("Next",()=>moveImage(gidx,idx,1),gidx>=groups.length-1),mkMini("Remove",()=>{group.splice(idx,1);renderGroups();}));
+                            cell.ondragstart=e=>{e.stopPropagation();dragInfo={gidx,idx};setTimeout(()=>cell.style.opacity=".35",0);};cell.ondragend=e=>{e.stopPropagation();cell.style.opacity="1";dragInfo=null;};
+                            cell.ondragover=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="#4a9";};cell.ondragleave=()=>{cell.style.borderColor="var(--border-color,#555)";};
+                            cell.ondrop=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="var(--border-color,#555)";if(!dragInfo)return;const [m]=groups[dragInfo.gidx].splice(dragInfo.idx,1); if(gidx!==dragInfo.gidx && group.length>=5){groups[dragInfo.gidx].splice(dragInfo.idx,0,m); alert("Target group already has 5 images.");} else {groups[gidx].splice(idx,0,m);} renderGroups();};
+                            cell.onclick=e=>{e.stopPropagation(); if(group.length>=5){alert("This group already has 5 images.");return;} group.splice(idx+1,0,path);renderGroups();};
+                            cell.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();group.splice(idx,1);renderGroups();};
+                            cell.append(badge,img,res,lbl,tools);grid.appendChild(cell);
+                        });
+                        panel.appendChild(grid);wrap.appendChild(panel);
                     });
                 }
-                renderGrid(); box.appendChild(grid);
-                const btns = document.createElement("div"); btns.style.cssText="display:flex;gap:8px;";
+                renderGroups();box.appendChild(wrap);
+                const groupBtns=document.createElement("div");groupBtns.style.cssText="display:flex;gap:8px;";
                 const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
-                btns.append(mkBtn("Cancel","",()=>overlay.remove()),mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{onConfirm(paths);overlay.remove();}));
+                groupBtns.append(mkBtn("Add Group","",()=>{groups.push([]);renderGroups();}),mkBtn("Flatten To One Group","",()=>{groups=[sqrFlattenRefGroups(groups).slice(0,5)];renderGroups();}));
+                box.appendChild(groupBtns);
+                const btns=document.createElement("div");btns.style.cssText="display:flex;gap:8px;";
+                btns.append(mkBtn("Cancel","",()=>overlay.remove()),mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{normalizeGroups();onConfirm(groups);overlay.remove();}));
                 box.appendChild(btns);
-                const _xBtn=document.createElement("button");_xBtn.textContent="×";_xBtn.style.cssText="position:absolute;top:10px;right:12px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--input-text,#aaa);line-height:1;padding:0;";_xBtn.onmouseover=()=>_xBtn.style.color="#fff";_xBtn.onmouseout=()=>_xBtn.style.color="var(--input-text,#aaa)";_xBtn.onclick=()=>overlay.remove();box.style.position="relative";box.appendChild(_xBtn);overlay.appendChild(box);overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};document.body.appendChild(overlay);
+                overlay.appendChild(box);overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};document.body.appendChild(overlay);
             };
 
             const _refNative = async () => {
                 // Use the browser dialog consistently across local and remote environments.
                 try {
                     const saved = await _sqrPickAndUploadImages();
-                    if (saved.length) { const cur = sqrParseRefPaths(getSqr("分段参考图")); saved.forEach(name => { if (!cur.includes(name)) cur.push(name); }); setSqr("分段参考图", sqrStoreRefPaths(cur)); refThumbWidget.syncPaths(); }
-                    showRefManager(result => { setSqr("分段参考图", sqrStoreRefPaths(result)); refThumbWidget.syncPaths(); node.setDirtyCanvas?.(true, true); });
+                    if (saved.length) {
+                        const cur = sqrParseRefGroups(getSqr(sqrKeys[4]));
+                        if (!cur.length) cur.push([]);
+                        for (const name of saved) {
+                            if (sqrFlattenRefGroups(cur).includes(name)) continue;
+                            let group = cur[cur.length - 1];
+                            if (group.length >= 5) { group = []; cur.push(group); }
+                            group.push(name);
+                        }
+                        setSqr(sqrKeys[4], sqrStoreRefGroups(cur));
+                        refThumbWidget.syncPaths();
+                    }
+                    showRefManager(result => { setSqr(sqrKeys[4], sqrStoreRefGroups(result)); refThumbWidget.syncPaths(); persistSqrState(); node.setDirtyCanvas?.(true, true); });
                 } catch(e) { console.warn("[SQR] Reference image selection failed:", e); }
             };
             const refBtn = node.addWidget("button", "Select Reference Images", null, () => {
@@ -1059,7 +1256,10 @@ app.registerExtension({
                 name: "_sqr_ref_thumbs", type: "sqr_thumbs", serialize: false,
                 _paths: [], _loaded: {}, _dragSrc: -1, _dragOver: -1,
                 syncPaths() {
-                    this._paths = sqrParseRefPaths(getSqr("分段参考图"));
+                    this._groups = sqrParseRefGroups(getSqr(sqrKeys[4]));
+                    this._paths = sqrFlattenRefGroups(this._groups);
+                    this._pathLabels = [];
+                    this._groups.forEach((group, gi) => group.forEach((_, ii) => this._pathLabels.push(this._groups.length > 1 ? `${gi + 1}.${ii + 1}` : String(ii + 1))));
                     const nextLoaded = {};
                     this._paths.forEach(p => { const img = new Image(); img.src = sqrThumbUrl(p); img.onload = () => node.setDirtyCanvas?.(true, true); nextLoaded[p] = img; });
                     this._loaded = nextLoaded;
@@ -1080,7 +1280,7 @@ app.registerExtension({
                         const labelH = Math.min(16, Math.max(12, Math.floor(h * 0.16)));
                         const imageH = Math.max(20, h - labelH);
                         if (img?.complete && img.naturalWidth) { const iw = img.naturalWidth, ih = img.naturalHeight; const scale = Math.min(w/iw, imageH/ih); const dw = iw*scale, dh = ih*scale; ctx.save(); if (this._dragSrc === i) ctx.globalAlpha = 0.35; ctx.drawImage(img, x+(w-dw)/2, ty+(imageH-dh)/2, dw, dh); ctx.restore(); } else { ctx.fillStyle = "#2a2a2a"; ctx.fillRect(x, ty, w, imageH); ctx.fillStyle = "#666"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("…", x+w/2, ty+imageH/2+4); }
-                        ctx.fillStyle = "rgba(50,150,70,0.92)"; ctx.fillRect(x, ty, 15, 15); ctx.fillStyle = "#fff"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(i+1), x+7.5, ty+11);
+                        ctx.fillStyle = "rgba(50,150,70,0.92)"; ctx.fillRect(x, ty, 15, 15); ctx.fillStyle = "#fff"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center"; ctx.fillText(this._pathLabels?.[i] || String(i+1), x+7.5, ty+11);
                         const res = img?.complete && img.naturalWidth ? `${img.naturalWidth}x${img.naturalHeight}` : "";
                         if (res) {
                             ctx.fillStyle = "rgba(0,0,0,0.45)";
@@ -1097,6 +1297,7 @@ app.registerExtension({
                 _idxAt(lx, ly, width) { return this._layout(width).findIndex(({x, y: iy, w, h}) => lx >= x && lx <= x+w && ly >= iy && ly <= iy+h); },
                 mouse(evt, pos, node) {
                     if (!this._paths.length) return false;
+                    if ((this._groups?.length || 0) > 1) return false;
                     const lx = pos[0], ly = pos[1], w = node.size[0];
                     if (evt.type === "mousedown" && evt.button === 0) { const i = this._idxAt(lx, ly, w); if (i >= 0) { this._dragSrc = i; this._dragOver = i; return true; } }
                     if (evt.type === "mousemove" && this._dragSrc >= 0) { const i = this._idxAt(lx, ly, w); if (i >= 0) this._dragOver = i; node.setDirtyCanvas?.(true, true); return true; }
@@ -1197,7 +1398,8 @@ app.registerExtension({
                         if (segWw) segWw.value = ckpt.segments;
                         if (fromW) fromW.value = Math.min(ckpt.next_seg, ckpt.total_segs);
                         if (lvBad) { try { const vn = app.graph?.getNodeById?.(parseInt(getSqr("参考视频节点ID"))); if (vn) { const sv=(n,v)=>{const w=vn.widgets?.find(w=>w.name===n);if(w)w.value=v;}; sv("video",ckptParams.video);sv("force_rate",ckptParams.force_rate);sv("frame_load_cap",ckptParams.frame_load_cap);sv("skip_first_frames",ckptParams.skip_first_frames);sv("select_every_nth",ckptParams.select_every_nth);vn.setDirtyCanvas?.(true,true); } } catch(e) {} }
-                        if (ckpt.ref_images?.length) { const si = Math.min(ckpt.next_seg-1, ckpt.ref_images.length-1); const sl = ckpt.ref_images.slice(si); if (sl.length) setSqr("分段参考图", sqrStoreRefPaths(sl)); }
+                        if (ckpt.ref_image_groups?.length) { const si = Math.min(ckpt.next_seg-1, ckpt.ref_image_groups.length-1); const sl = ckpt.ref_image_groups.slice(si); if (sl.length) setSqr(sqrKeys[4], sqrStoreRefGroups(sl)); }
+                        else if (ckpt.ref_images?.length) { const si = Math.min(ckpt.next_seg-1, ckpt.ref_images.length-1); const sl = ckpt.ref_images.slice(si); if (sl.length) setSqr(sqrKeys[4], sqrStoreRefPaths(sl)); }
                     } else {
                         if (fromW) fromW.value = 1;
                         if (opts.newSegCount) _sqrEnsureSegCapacity(opts.newSegCount);
@@ -1207,6 +1409,7 @@ app.registerExtension({
                     if (segWw && startW) { startW.options.max = Math.round(segWw.value); if (startW.value > startW.options.max) startW.value = startW.options.max; }
                     const tw = node.widgets?.find(w=>w.name==="_sqr_ref_thumbs"); if (tw) tw.syncPaths?.();
                     if (bannerWidget) { node._sqrCheckpointBanner = false; const bi = node.widgets?.indexOf(bannerWidget); if (bi>=0) node.widgets.splice(bi,1); }
+                    persistSqrState();
                     overlay.remove(); node.setDirtyCanvas?.(true,true);
                 };
 

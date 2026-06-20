@@ -836,6 +836,8 @@ class SegmentQueueRunner:
                 "续跑视频路径":   ("STRING", {"default": ""}),
                 "multi_ref_enabled": ("BOOLEAN", {"default": False,
                     "tooltip": "Multi Ref OFF keeps the original per-segment reference mode. Multi Ref ON loads the selected references as one single-person multi-reference batch for every segment."}),
+                "replacement_enabled": ("BOOLEAN", {"default": False,
+                    "tooltip": "Replacement OFF/ON syncs SCAIL-2 colored mask and transition replacement_mode."}),
                 "sqr_save_png":      ("STRING", {"default": "true"}),
                 "sqr_frame_offset":  ("INT",    {"default": -1}),
                 "sqr_pre_segments":  ("STRING", {"default": ""}),
@@ -852,6 +854,7 @@ class SegmentQueueRunner:
             参考视频节点ID, 输出节点ID, 动作嵌入节点ID, 参考图节点ID,
             分段参考图, 续跑视频路径,
             multi_ref_enabled=False,
+            replacement_enabled=False,
             sqr_save_png="true",
             sqr_frame_offset=-1,
             sqr_pre_segments="",
@@ -935,23 +938,52 @@ class SegmentQueueRunner:
         segs_to_run = seg_list[start_idx:]
         base_prompt = copy.deepcopy(_effective_prompt)
 
+        for _node in base_prompt.values():
+            if not isinstance(_node, dict):
+                continue
+            if _node.get("class_type") in ("SQRScail2ColoredMaskAdvanced", "SQRSCAIL2TransitionToVideo"):
+                _node.setdefault("inputs", {})["replacement_mode"] = replacement_enabled
+            if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
+                _node.setdefault("inputs", {})["identity_mode"] = (
+                    "single_person_multi_reference" if multi_ref_enabled else "multi_person"
+                )
+
         ae_nid = ae_node_id or find_animate_embeds_node(base_prompt) or ""
         vc_nid = find_video_combine_node(base_prompt, combine_nid) or ""
 
         ref_images_list = []
+        ref_image_groups = []
         if ref_imgs_str:
             if ref_imgs_str.lstrip().startswith("["):
                 try:
                     parsed_refs = json.loads(ref_imgs_str)
                     if isinstance(parsed_refs, list):
-                        ref_images_list = [str(x).strip() for x in parsed_refs if str(x).strip()]
+                        if any(isinstance(x, list) for x in parsed_refs):
+                            for group in parsed_refs:
+                                if isinstance(group, list):
+                                    cleaned = [str(x).strip() for x in group if str(x).strip()]
+                                else:
+                                    cleaned = [str(group).strip()] if str(group).strip() else []
+                                if cleaned:
+                                    ref_image_groups.append(cleaned)
+                            ref_images_list = [x for group in ref_image_groups for x in group]
+                        else:
+                            ref_images_list = [str(x).strip() for x in parsed_refs if str(x).strip()]
                 except Exception as e:
                     print(f"[SQR] Reference image JSON parse failed; using legacy format: {e}")
             if not ref_images_list:
                 import re as _re
                 legacy_refs = _re.findall(r"(?:^|,)\s*(.*?\.(?:png|jpe?g|webp|bmp))(?=,|$)", ref_imgs_str, flags=_re.IGNORECASE)
                 ref_images_list = [x.strip() for x in (legacy_refs or ref_imgs_str.split(",")) if x.strip()]
-        if ref_images_list:
+        if ref_image_groups:
+            prepared_groups = []
+            for group in ref_image_groups:
+                prepared = _sqr_prepare_checkpoint_ref_images(group, unique_id=unique_id)
+                if prepared:
+                    prepared_groups.append(prepared)
+            ref_image_groups = prepared_groups
+            ref_images_list = [x for group in ref_image_groups for x in group]
+        elif ref_images_list:
             ref_images_list = _sqr_prepare_checkpoint_ref_images(ref_images_list, unique_id=unique_id)
 
         manual_video_path = manual_video_frames = None
@@ -1202,15 +1234,20 @@ class SegmentQueueRunner:
                     ref_class = ref_node.get("class_type", "")
                     ref_inputs = ref_node.setdefault("inputs", {})
                     if multi_ref_enabled and ref_class in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
-                        max_refs = min(len(ref_images_list), 6)
+                        active_refs = ref_images_list
+                        if ref_image_groups:
+                            group_index = min(i, len(ref_image_groups) - 1)
+                            active_refs = ref_image_groups[group_index]
+                        max_refs = min(len(active_refs), 5)
                         for ref_slot in range(1, 7):
                             ref_inputs.pop(f"image_{ref_slot}", None)
-                        for ref_slot, img_entry in enumerate(ref_images_list[:max_refs], start=1):
+                        for ref_slot, img_entry in enumerate(active_refs[:max_refs], start=1):
                             img_name = _sqr_ref_entry_to_input_name(img_entry)
                             load_id = f"sqr_mref_{seg_num}_{ref_slot}"
                             wf[load_id] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
                             ref_inputs[f"image_{ref_slot}"] = [load_id, 0]
-                        log(f"  OK Multi Ref: loaded {max_refs} reference images into {ref_class}")
+                        group_note = f" group {min(i + 1, len(ref_image_groups))}/{len(ref_image_groups)}" if ref_image_groups else ""
+                        log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}")
                     else:
                         if multi_ref_enabled:
                             log(f"  ! Multi Ref ON expects reference node ID to point to Wan SQR Multi Reference; current={ref_class or 'Unknown'}, fallback to single image mode")
@@ -1393,6 +1430,7 @@ class SegmentQueueRunner:
                                 "transition_video":       _trans_fname,
                                 "transition_latent":      last_latent_name or "",
                                 "ref_images":             ref_images_list,
+                                "ref_image_groups":      ref_image_groups,
                                 "segments":               segments,
                                 "ref_video":              _ref_video_params.get("video", ""),
                                 "ref_video_params":       _ref_video_params,
