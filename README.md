@@ -6,9 +6,9 @@ An automated long-video segment queue runner focused on ComfyUI core WanAnimate 
 
 ## Update 2026-JUN-21
 
-Summary
+## Summary--
 Add segmented multi-reference grouping controls, synchronized SCAIL-2 mode toggles, persistent WanAni SQR UI state, and robust multi-reference image size handling.
-Description
+## Description--
 This update improves WanAni SQR multi-reference workflows for SCAIL-2 segmented generation. The SQR node now supports grouped reference images per segment, with each segment able to receive its own multi-reference set. Multi Ref ON/OFF synchronizes SCAIL-2 Colored Mask identity mode between single_person_multi_reference and multi_person, while the new Replacement ON/OFF button synchronizes replacement_mode across the advanced colored mask and SCAIL-2 transition nodes. The SQR frontend state is persisted more reliably when switching workflows, reducing unexpected toggle resets, missing images, or resume-video activation.
 Wan SQR Multi Reference now includes match_and_fill, which pads mixed-size reference images to the largest group canvas using a white background before keep/crop processing. This prevents mixed-resolution reference batches from failing in keep mode while preserving image content without scaling.
 
