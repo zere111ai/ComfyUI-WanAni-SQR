@@ -1601,11 +1601,11 @@ class SegmentQueueRunner:
 
 
 NODE_CLASS_MAPPINGS = {
-    "SegmentQueueRunner": SegmentQueueRunner,
+    "WanAniSQRSegmentQueue": SegmentQueueRunner,
     "SQRReplaceBatchPrefix": SQRReplaceBatchPrefix,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SegmentQueueRunner": "WanAni SQR",
+    "WanAniSQRSegmentQueue": "WanAni SQR",
     "SQRReplaceBatchPrefix": "SQR Replace Batch Prefix",
 }
 

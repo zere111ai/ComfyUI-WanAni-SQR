@@ -1,5 +1,5 @@
 {
-  "SegmentQueueRunner": {
+  "WanAniSQRSegmentQueue": {
     "display_name": "WanAni SQR",
     "description": "Queue long WanAnimate workflows by segment, with preview, resume, reference switching, merging, and optional transitions.",
     "inputs": {

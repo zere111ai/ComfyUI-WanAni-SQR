@@ -362,7 +362,7 @@ function _showLogOverlay(nodeId) {
 
 
 app.registerExtension({
-    name: "SegmentQueueRunner.UI",
+    name: "WanAniSQRSegmentQueue.UI",
 
     async setup() {
         const origQueuePrompt = app.queuePrompt?.bind(app);
@@ -370,7 +370,7 @@ app.registerExtension({
 
         app.queuePrompt = async function(number, batchCount) {
             const sqrNodes = (app.graph?.nodes || []).filter(n =>
-                n.type === "SegmentQueueRunner" && !n.muted && n.mode !== 4
+                n.type === "WanAniSQRSegmentQueue" && !n.muted && n.mode !== 4
             );
             if (sqrNodes.length === 0) {
                 return origQueuePrompt(number, batchCount);
@@ -415,7 +415,7 @@ app.registerExtension({
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "SegmentQueueRunner") return;
+        if (nodeData.name !== "WanAniSQRSegmentQueue") return;
 
         const origCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function() {
