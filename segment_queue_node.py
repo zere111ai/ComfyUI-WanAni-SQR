@@ -1032,6 +1032,13 @@ class SegmentQueueRunner:
         else:
             _sqr_log(unique_id, f"[SQR] ⚠ 无法获取音频文件名")
 
+        try:
+            main_ref_skip_first = max(0, int(base_prompt.get(node_id, {}).get("inputs", {}).get("skip_first_frames", 0) or 0))
+        except Exception:
+            main_ref_skip_first = 0
+        if main_ref_skip_first > 0:
+            _sqr_log(unique_id, f"[SQR] Load Video 原始 skip_first_frames={main_ref_skip_first}，分段读取会保留这个起始偏移")
+
         image_src_node = None
         latent_src_node = None
         if vc_nid and vc_nid in base_prompt:
@@ -1113,11 +1120,11 @@ class SegmentQueueRunner:
                 if transition_enabled and not transition_supported and seg_num == start_idx + 1:
                     log(f"  ⚠ 当前节点[{_ae_class_type}]不支持 transition_video，过渡效果回退为直出合并")
 
-                wf[node_id]["inputs"]["skip_first_frames"] = _video_skip
+                wf[node_id]["inputs"]["skip_first_frames"] = main_ref_skip_first + _video_skip
                 wf[node_id]["inputs"]["frame_load_cap"]    = _video_limit
 
                 if vc_nid and vc_nid in wf and audio_filename:
-                    _real_skip = skip + _frame_offset
+                    _real_skip = main_ref_skip_first + skip + _frame_offset
                     if use_transition:
                         audio_skip_frames    = max(0, _real_skip - (transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM))
                         main_audio_frames    = max(0, _real_skip - transition_added_frames)
