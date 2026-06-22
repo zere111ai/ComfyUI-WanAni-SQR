@@ -282,13 +282,13 @@ class SQRScail2ReferenceBatchStack:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image_1": ("IMAGE",),
                 "width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8, "forceInput": True}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8, "forceInput": True}),
                 "crop_mode": (["keep", "crop_to_video_aspect"], {"default": "keep"}),
                 "match_and_fill": ("BOOLEAN", {"default": True}),
             },
             "optional": {
+                "image_1": ("IMAGE",),
                 "image_2": ("IMAGE",),
                 "image_3": ("IMAGE",),
                 "image_4": ("IMAGE",),
@@ -302,9 +302,11 @@ class SQRScail2ReferenceBatchStack:
     FUNCTION = "execute"
     CATEGORY = "SQR/SCAIL2"
 
-    def execute(self, image_1, width, height, crop_mode="keep", match_and_fill=True, image_2=None, image_3=None,
+    def execute(self, width, height, crop_mode="keep", match_and_fill=True, image_1=None, image_2=None, image_3=None,
                 image_4=None, image_5=None, image_6=None):
         images = [img for img in (image_1, image_2, image_3, image_4, image_5, image_6) if img is not None and img.shape[0] > 0]
+        if not images:
+            raise ValueError("Wan SQR Multi Reference needs at least one reference image. In SQR Multi Ref mode, select reference images in the WanAni SQR / WAN ANI DIRECTOR node before executing.")
         refs = [img[:1, :, :, :3] for img in images]
         if match_and_fill and len(refs) > 1:
             refs = _match_and_fill_refs(refs)

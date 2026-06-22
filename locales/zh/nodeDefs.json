@@ -58,5 +58,14 @@
         "name": "Transition Skip Frames"
       }
     }
+  },
+  "WanAniDirector": {
+    "display_name": "WAN ANI DIRECTOR",
+    "description": "Director-style visual controller for WanAni SQR segmented generation. It keeps the original WanAni SQR node untouched while providing a timeline-oriented interface.",
+    "inputs": {
+      "director_data": {
+        "name": "Director Data"
+      }
+    }
   }
 }

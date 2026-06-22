@@ -1064,6 +1064,7 @@ class SegmentQueueRunner:
             last_latent_name  = None
             segment_output_paths = []
             sqr_cut_cleanup = []
+            sqr_full_cleanup = []
             sqr_cut_paths   = []
             _t0 = time.time()
             _total_frames_ran = sum(limit for _, limit in segs_to_run)
@@ -1354,6 +1355,12 @@ class SegmentQueueRunner:
                 if vc_nid and vc_nid in wf:
                     wf[vc_nid]["inputs"]["images"] = image_src
 
+                    full_vc_id = f"sqr_full_vc_{seg_num}"
+                    full_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
+                    full_inputs["images"] = image_src
+                    full_inputs["save_output"] = True
+                    full_inputs["save_metadata"] = False
+
                     cut_vc_id = f"sqr_cut_vc_{seg_num}"
                     cut_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
                     cut_inputs["images"]          = [final_image_node, 0]
@@ -1362,6 +1369,8 @@ class SegmentQueueRunner:
                     _main_prefix = wf[vc_nid]["inputs"].get("filename_prefix", "")
                     _slash = max(_main_prefix.rfind("/"), _main_prefix.rfind("\\"))
                     _subfolder_prefix = _main_prefix[:_slash+1] if _slash >= 0 else ""
+                    _full_file_prefix = f"sqr_full_{run_stamp}_seg{seg_num}_"
+                    full_inputs["filename_prefix"] = f"{_subfolder_prefix}{_full_file_prefix}"
                     _cut_file_prefix = f"sqr_cut_{run_stamp}_seg{seg_num}_"
                     cut_inputs["filename_prefix"] = f"{_subfolder_prefix}{_cut_file_prefix}"
 
@@ -1378,11 +1387,13 @@ class SegmentQueueRunner:
                         cut_inputs["audio"] = [cut_audio_id, 0]
                         log(f"  ✓ cut_vc音频: start={audio_skip_frames/frame_rate:.3f}s (={audio_skip_frames}帧)")
 
+                    wf[full_vc_id] = {"class_type": "VHS_VideoCombine", "inputs": full_inputs}
                     wf[cut_vc_id] = {"class_type": "VHS_VideoCombine", "inputs": cut_inputs}
                     _cut_search_dir = os.path.join(folder_paths.get_output_directory(),
                                                    _subfolder_prefix.rstrip("/\\")) \
                                       if _subfolder_prefix else folder_paths.get_output_directory()
                     sqr_cut_cleanup.append((_cut_search_dir, _cut_file_prefix))
+                    sqr_full_cleanup.append((_cut_search_dir, _full_file_prefix))
 
                 latent_save_id = None
                 if latent_src_node and _supports_latent_transition:
@@ -1463,7 +1474,10 @@ class SegmentQueueRunner:
                             else:
                                 log(f"  ⚠ 未找到裁切输出视频")
 
-                        vpath, vframes = get_output_video_info(pid, vc_nid, logger=log) if vc_nid else (None, None)
+                        full_vc_id_done = f"sqr_full_vc_{seg_num}"
+                        vpath, vframes = get_output_video_info(pid, full_vc_id_done, logger=log) if vc_nid else (None, None)
+                        if not vpath and vc_nid:
+                            vpath, vframes = get_output_video_info(pid, vc_nid, logger=log)
                         if latent_save_id:
                             lpath = get_output_latent_info(pid, latent_save_id, logger=log)
                             lname = _sqr_copy_latent_into_input(lpath, unique_id=unique_id, seg_num=seg_num) if lpath else None
@@ -1551,6 +1565,23 @@ class SegmentQueueRunner:
                 except Exception:
                     pass
 
+            for (_clean_dir, _clean_prefix) in sqr_full_cleanup:
+                try:
+                    if not os.path.isdir(_clean_dir):
+                        continue
+                    for _f in os.listdir(_clean_dir):
+                        if not _f.startswith(_clean_prefix):
+                            continue
+                        _fpath = os.path.join(_clean_dir, _f)
+                        if _f.endswith(".mp4") or _f.endswith(".png"):
+                            try:
+                                os.remove(_fpath)
+                                print(f"[SQR] 已清理内部过渡源: {_f}")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
             _sqr_save_png = (str(sqr_save_png).lower() != "false")
             _should_clean_main_png = not _sqr_save_png
             print(f"[SQR] Save png 设置: {sqr_save_png} → {'保留' if _sqr_save_png else '清理'}主节点 png")
@@ -1607,12 +1638,30 @@ class SegmentQueueRunner:
         return {}
 
 
+class WanAniDirector(SegmentQueueRunner):
+    CATEGORY = "video/utils"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        data = copy.deepcopy(super().INPUT_TYPES())
+        data["required"]["director_data"] = ("STRING", {
+            "default": "{}",
+            "tooltip": "JSON state for the WAN ANI DIRECTOR UI."
+        })
+        return data
+
+    def run(self, *args, director_data="{}", **kwargs):
+        return super().run(*args, **kwargs)
+
+
 NODE_CLASS_MAPPINGS = {
     "WanAniSQRSegmentQueue": SegmentQueueRunner,
+    "WanAniDirector": WanAniDirector,
     "SQRReplaceBatchPrefix": SQRReplaceBatchPrefix,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanAniSQRSegmentQueue": "WanAni SQR",
+    "WanAniDirector": "WAN ANI DIRECTOR",
     "SQRReplaceBatchPrefix": "SQR Replace Batch Prefix",
 }
 
