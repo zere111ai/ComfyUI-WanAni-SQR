@@ -181,34 +181,38 @@ def _match_and_fill_refs(refs):
 
 class LHResolutionSetting:
     RESOLUTIONS = {
-        "1:1 480": (480, 480),
-        "1:1 720": (720, 720),
-        "1:1 1024": (1024, 1024),
-        "1:1 1440": (1440, 1440),
-        "1:1 2160": (2160, 2160),
-        "4:3 480p": (640, 480),
-        "4:3 768p": (1024, 768),
-        "4:3 1080p": (1440, 1080),
-        "4:3 1536p": (2048, 1536),
-        "4:3 4K": (2880, 2160),
-        "16:9 480p": (854, 480),
-        "16:9 720p": (1280, 720),
-        "16:9 1080p": (1920, 1080),
-        "16:9 1440p": (2560, 1440),
-        "16:9 4K": (3840, 2160),
-        "21:9 480p": (1120, 480),
-        "21:9 720p": (1680, 720),
-        "21:9 1080p": (2560, 1080),
-        "21:9 1440p": (3440, 1440),
-        "21:9 4K": (5120, 2160),
+        "1:1 480p - 480 x 480": (480, 480),
+        "1:1 720p - 720 x 720": (720, 720),
+        "1:1 1024 - 1024 x 1024": (1024, 1024),
+        "1:1 1440p - 1440 x 1440": (1440, 1440),
+        "1:1 4K - 2160 x 2160": (2160, 2160),
+        "4:3 480p - 640 x 480": (640, 480),
+        "4:3 768p - 1024 x 768": (1024, 768),
+        "4:3 1080p - 1440 x 1080": (1440, 1080),
+        "4:3 1080p safe - 1440 x 1072": (1440, 1072),
+        "4:3 1536p - 2048 x 1536": (2048, 1536),
+        "4:3 4K - 2880 x 2160": (2880, 2160),
+        "16:9 480p - 854 x 480": (854, 480),
+        "16:9 480p safe - 848 x 480": (848, 480),
+        "16:9 720p - 1280 x 720": (1280, 720),
+        "16:9 1080p - 1920 x 1080": (1920, 1080),
+        "16:9 1080p safe - 1920 x 1072": (1920, 1072),
+        "16:9 1440p - 2560 x 1440": (2560, 1440),
+        "16:9 4K - 3840 x 2160": (3840, 2160),
+        "21:9 480p - 1120 x 480": (1120, 480),
+        "21:9 720p - 1680 x 720": (1680, 720),
+        "21:9 1080p - 2560 x 1080": (2560, 1080),
+        "21:9 1080p safe - 2560 x 1072": (2560, 1072),
+        "21:9 1440p - 3440 x 1440": (3440, 1440),
+        "21:9 4K - 5120 x 2160": (5120, 2160),
     }
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "orientation": (["landscape", "portrait"], {"default": "portrait"}),
-                "resolution": (list(cls.RESOLUTIONS.keys()), {"default": "1:1 1024"}),
+                "orientation": (["横屏 Landscape", "竖屏 Portrait"], {"default": "竖屏 Portrait"}),
+                "resolution": (list(cls.RESOLUTIONS.keys()), {"default": "1:1 1024 - 1024 x 1024"}),
                 "manual_override": ("BOOLEAN", {"default": False}),
                 "manual_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
                 "manual_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
@@ -224,7 +228,7 @@ class LHResolutionSetting:
         if manual_override:
             return (int(manual_width), int(manual_height))
         width, height = self.RESOLUTIONS.get(resolution, (1024, 1024))
-        if orientation == "portrait" and width != height:
+        if ("portrait" in str(orientation).lower() or "竖屏" in str(orientation)) and width != height:
             width, height = height, width
         return (int(width), int(height))
 
@@ -415,6 +419,13 @@ class SQRScail2ReferenceBatchSplit:
             additional_images = main_image[:0]
 
         mask_count = reference_masks.shape[0]
+        if 0 < mask_count < count:
+            repeat_count = count - mask_count
+            reference_masks = torch.cat(
+                [reference_masks, reference_masks[-1:].repeat((repeat_count, 1, 1, 1))],
+                dim=0,
+            )
+            mask_count = reference_masks.shape[0]
         mask_index = min(main_index, max(0, mask_count - 1))
         main_mask = reference_masks[mask_index:mask_index + 1]
         mask_parts = [reference_masks[i:i + 1] for i in range(mask_count) if i != mask_index]

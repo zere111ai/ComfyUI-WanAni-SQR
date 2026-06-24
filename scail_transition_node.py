@@ -32,7 +32,7 @@ def _prepend_first_frame(video, frame_count):
     return torch.cat([video[:1].repeat(frame_count, 1, 1, 1), video], dim=0)
 
 
-def _extract_mask_to_28ch(rgb_video):
+def _extract_mask_to_28ch(rgb_video, latent_size=None):
     """Convert a colored SCAIL-2 identity mask to its 28-channel latent mask."""
     frame_count, height, width, _ = rgb_video.shape
     threshold = 225.0 / 255.0
@@ -50,10 +50,13 @@ def _extract_mask_to_28ch(rgb_video):
         red * not_green * blue,
         not_red * green * blue,
     ], dim=1)
-    latent_height, latent_width = height, width
-    for _ in range(3):
-        latent_height = (latent_height + 1) // 2
-        latent_width = (latent_width + 1) // 2
+    if latent_size is not None:
+        latent_height, latent_width = int(latent_size[0]), int(latent_size[1])
+    else:
+        latent_height, latent_width = height, width
+        for _ in range(3):
+            latent_height = (latent_height + 1) // 2
+            latent_width = (latent_width + 1) // 2
     binary = torch.nn.functional.interpolate(binary, size=(latent_height, latent_width), mode="area")
     latent_frames = (frame_count - 1) // 4 + 1
     padded = torch.cat([binary[:1].repeat(4, 1, 1, 1), binary[1:]], dim=0)
@@ -221,6 +224,7 @@ class SQRSCAIL2TransitionToVideo:
             device=comfy.model_management.intermediate_device(),
         )
         noise_mask = None
+        latent_spatial_size = (latent.shape[-2], latent.shape[-1])
         ref_mask_flag = not replacement_mode
         positive = node_helpers.conditioning_set_values(positive, {"ref_mask_flag": ref_mask_flag})
         negative = node_helpers.conditioning_set_values(negative, {"ref_mask_flag": ref_mask_flag})
@@ -237,7 +241,7 @@ class SQRSCAIL2TransitionToVideo:
             ref_latents.append(vae.encode(ref_image[:, :, :, :3]))
             if ref_mask is not None:
                 ref_mask_hw = comfy.utils.common_upscale(ref_mask[:1].movedim(-1, 1), width, height, "bicubic", "center").movedim(1, -1)
-                ref_masks_28ch.append(_extract_mask_to_28ch(ref_mask_hw))
+                ref_masks_28ch.append(_extract_mask_to_28ch(ref_mask_hw, latent_spatial_size))
 
         if reference_image is not None:
             add_reference(reference_image, reference_image_mask)
@@ -273,10 +277,13 @@ class SQRSCAIL2TransitionToVideo:
             pose_latent = vae.encode(pose_video[:, :, :, :3]) * pose_strength
             positive = node_helpers.conditioning_set_values_with_timestep_range(positive, {"pose_video_latent": pose_latent}, pose_start, pose_end)
             negative = node_helpers.conditioning_set_values_with_timestep_range(negative, {"pose_video_latent": pose_latent}, pose_start, pose_end)
+        else:
+            pose_latent = None
 
         if pose_video_mask is not None:
             mask_video = comfy.utils.common_upscale(pose_video_mask[:length].movedim(-1, 1), width // 2, height // 2, "area", "center").movedim(1, -1)
-            driving_mask = _extract_mask_to_28ch(mask_video)
+            driving_mask_size = (pose_latent.shape[-2], pose_latent.shape[-1]) if pose_latent is not None else latent_spatial_size
+            driving_mask = _extract_mask_to_28ch(mask_video, driving_mask_size)
             positive = node_helpers.conditioning_set_values(positive, {"driving_mask_28ch": driving_mask})
             negative = node_helpers.conditioning_set_values(negative, {"driving_mask_28ch": driving_mask})
 

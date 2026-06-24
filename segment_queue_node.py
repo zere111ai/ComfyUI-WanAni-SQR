@@ -43,10 +43,16 @@ def _sqr_log_cv2_issue(uid, scene: str, e: Exception):
 
 
 def calc_segments(total_frames: int, segments: int) -> list:
+    total_frames = max(0, int(total_frames))
+    segments = max(1, int(segments))
+    if total_frames <= 0:
+        return []
     per_seg = ((math.ceil(total_frames / segments) + 3) // 4) * 4 + 1
     result = []
     for i in range(segments):
         skip = i * per_seg
+        if skip >= total_frames:
+            break
         if i < segments - 1:
             limit = per_seg
         else:
@@ -54,6 +60,33 @@ def calc_segments(total_frames: int, segments: int) -> list:
             limit = ((remaining + 3) // 4) * 4 + 1
         result.append((skip, limit))
     return result
+
+
+def _sqr_to_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on", "enabled"):
+            return True
+        if text in ("0", "false", "no", "off", "disabled", ""):
+            return False
+    return default
+
+
+def _sqr_to_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str) and not value.strip():
+            return default
+        return int(value)
+    except Exception:
+        return default
 
 
 # ── 速度记录（预计时长）──
@@ -863,23 +896,26 @@ class SegmentQueueRunner:
 
         total_frames       = 总帧数
         segments           = 分段数
-        transition_enabled = bool(启用过渡效果)
-        multi_ref_enabled  = bool(multi_ref_enabled)
+        transition_enabled = _sqr_to_bool(启用过渡效果)
+        multi_ref_enabled  = _sqr_to_bool(multi_ref_enabled)
+        replacement_enabled = _sqr_to_bool(replacement_enabled)
         node_id            = 参考视频节点ID.strip()
         frame_rate         = 帧率
         combine_nid        = 输出节点ID.strip()
         ae_node_id         = 动作嵌入节点ID.strip()
         resume_video_path  = 续跑视频路径.strip()
-        resume_enabled     = bool(resume_video_path)
+        resume_enabled     = _sqr_to_bool(启用续跑) and bool(resume_video_path)
         skip_frames_manual = 过渡跳过帧数
         ri_node_id         = 参考图节点ID.strip()
         ref_imgs_str       = 分段参考图.strip()
 
+        sqr_frame_offset = _sqr_to_int(sqr_frame_offset, -1)
         _frame_offset_param = sqr_frame_offset if sqr_frame_offset >= 0 else -1
         if _frame_offset_param < 0 and prompt and unique_id:
             _self_inputs = (prompt or {}).get(str(unique_id), {}).get("inputs", {})
             _fo_val = _self_inputs.get("sqr_frame_offset", -1)
-            _frame_offset_param = int(_fo_val) if _fo_val is not None and int(_fo_val) >= 0 else -1
+            _fo_int = _sqr_to_int(_fo_val, -1)
+            _frame_offset_param = _fo_int if _fo_int >= 0 else -1
         _frame_offset = _frame_offset_param if _frame_offset_param >= 0 else 0
 
         _plan_frames = max(1, total_frames - _frame_offset) if _frame_offset > 0 else total_frames
@@ -933,7 +969,11 @@ class SegmentQueueRunner:
         _effective_frames = max(1, total_frames - _frame_offset) if _frame_offset > 0 else total_frames
 
         seg_list = calc_segments(_effective_frames, segments)
+        if not seg_list:
+            _sqr_log(unique_id, "[SQR] ✗ 没有可执行分段，请检查总帧数和帧偏移。")
+            return {}
 
+        start_from_segment = max(1, min(start_from_segment, len(seg_list)))
         start_idx   = start_from_segment - 1
         segs_to_run = seg_list[start_idx:]
         base_prompt = copy.deepcopy(_effective_prompt)
@@ -1582,7 +1622,7 @@ class SegmentQueueRunner:
                 except Exception:
                     pass
 
-            _sqr_save_png = (str(sqr_save_png).lower() != "false")
+            _sqr_save_png = _sqr_to_bool(sqr_save_png, True)
             _should_clean_main_png = not _sqr_save_png
             print(f"[SQR] Save png 设置: {sqr_save_png} → {'保留' if _sqr_save_png else '清理'}主节点 png")
 

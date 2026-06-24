@@ -99,8 +99,6 @@ class SQRWanAnimateTransitionToVideo:
             )
 
         latent_length = ((length - 1) // 4) + 1
-        latent_width = width // 8
-        latent_height = height // 8
         trim_latent = 0
 
         if reference_image is None:
@@ -108,6 +106,8 @@ class SQRWanAnimateTransitionToVideo:
 
         image = comfy.utils.common_upscale(reference_image[:length].movedim(-1, 1), width, height, "area", "center").movedim(1, -1)
         concat_latent_image = vae.encode(image[:, :, :, :3])
+        latent_height = concat_latent_image.shape[-2]
+        latent_width = concat_latent_image.shape[-1]
         mask = torch.zeros((1, 4, concat_latent_image.shape[-3], concat_latent_image.shape[-2], concat_latent_image.shape[-1]), device=concat_latent_image.device, dtype=concat_latent_image.dtype)
         trim_latent += concat_latent_image.shape[2]
         ref_motion_latent_length = 0

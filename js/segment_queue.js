@@ -382,7 +382,8 @@ app.registerExtension({
                 if (preW) preW.value = "";
 
                 const resumePath = getNodeW("续跑视频路径")?.value || "";
-                if (resumePath) {
+                const resumeEnabled = !!getNodeW("启用续跑")?.value;
+                if (resumeEnabled && resumePath) {
                     const prePaths = await _showPreSegmentDialog(sqrNode);
                     if (prePaths === null) return;
                     if (prePaths?.cancelResume) {
@@ -936,9 +937,12 @@ app.registerExtension({
                     _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
                     _sqrDrawTopButton(ctx, "log", rightX + actionW + idsW + gap * 2, topY, logW, h, "Log", false, { mode: "action", hitY: 4 });
 
-                    const toggleW = Math.max(68, Math.min(92, (width - actionW - idsW - logW - 64) / 4));
+                    const toggleAreaX = 7;
+                    const toggleAreaRight = Math.max(toggleAreaX, rightX - 8);
+                    const toggleAreaW = Math.max(0, toggleAreaRight - toggleAreaX);
+                    const toggleW = Math.max(58, Math.min(92, (toggleAreaW - gap * 3) / 4));
                     const totalW = toggleW * 4 + gap * 3;
-                    const midX = Math.max(7, Math.min((width - totalW) / 2, rightX - totalW - 8));
+                    const midX = toggleAreaX + Math.max(0, (toggleAreaW - totalW) / 2);
                     const multiRefOn = !!multiRefW?.value;
                     const replacementOn = !!replacementW?.value;
                     const transOn = !!transitionW?.value;
@@ -1028,6 +1032,7 @@ app.registerExtension({
 
             const _applyVideo = (result) => {
                 if (!result) return;
+                const rtw = getW("启用续跑"); if (rtw) rtw.value = true;
                 setSqr("续跑视频路径", result);
                 const fname = result.split(/[/\\]/).pop();
                 const m = fname.match(/sqr_trans_[0-9_]+_seg(\d+)\.mp4$/i) || fname.match(/sqr_trans_[a-f0-9]+_seg(\d+)\.mp4$/i) || fname.match(/segment_transition_seg(\d+)\.mp4$/i);
@@ -1047,7 +1052,7 @@ app.registerExtension({
                 }
                 node.setDirtyCanvas?.(true, true);
                 resumeBtn._sqrActive = true;
-                const rtw = getW("启用续跑"); if (rtw) rtw.value = true;
+                persistSqrState();
             };
 
             const _resumeNative = async () => {
