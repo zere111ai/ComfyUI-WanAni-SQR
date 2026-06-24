@@ -423,7 +423,8 @@ app.registerExtension({
             const r = origCreated ? origCreated.apply(this, arguments) : undefined;
             const node = this;
             const getW = name => node.widgets?.find(w => w.name === name);
-            if (node.size) node.size[0] = Math.max(node.size[0] || 0, 520);
+            const SQR_TOPBAR_MIN_WIDTH = 760;
+            if (node.size) node.size[0] = Math.max(node.size[0] || 0, SQR_TOPBAR_MIN_WIDTH);
 
             const sqrKeys = ["参考图节点ID","参考视频节点ID","输出节点ID","动作嵌入节点ID","分段参考图","续跑视频路径"];
             const resumeToggle = getW("启用续跑");
@@ -857,7 +858,7 @@ app.registerExtension({
                 ctx.strokeStyle = opts.mode === "action" ? "rgba(255,255,255,0.22)" : (active ? "rgba(120,255,180,0.75)" : "rgba(255,150,150,0.75)");
                 ctx.lineWidth = 1;
                 ctx.beginPath();
-                ctx.roundRect ? ctx.roundRect(x, y, w, h, 6) : ctx.rect(x, y, w, h);
+                ctx.rect(x, y, w, h);
                 ctx.fill();
                 ctx.stroke();
                 ctx.fillStyle = opts.textColor || "#f4f4f4";
@@ -924,15 +925,18 @@ app.registerExtension({
                 name: "_sqr_topbar",
                 type: "sqr_topbar",
                 serialize: false,
-                computeSize(width) { return [width, 30]; },
+                computeSize(width) { return [Math.max(width || 0, SQR_TOPBAR_MIN_WIDTH), 30]; },
                 draw(ctx, nodeRef, width, y) {
+                    for (const key of Object.keys(_sqrTopHit)) delete _sqrTopHit[key];
+                    if (nodeRef?.size) nodeRef.size[0] = Math.max(nodeRef.size[0] || 0, SQR_TOPBAR_MIN_WIDTH);
+                    const barW = Math.max(width || 0, nodeRef?.size?.[0] || 0, SQR_TOPBAR_MIN_WIDTH);
                     const h = 22;
                     const topY = y + 4;
                     const gap = 5;
                     const actionW = 54;
                     const idsW = 58;
                     const logW = 42;
-                    const rightX = width - actionW - idsW - logW - gap * 2 - 7;
+                    const rightX = barW - actionW - idsW - logW - gap * 2 - 7;
                     _sqrDrawTopButton(ctx, "settings", rightX, topY, actionW, h, "Settings", false, { mode: "action", hitY: 4 });
                     _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
                     _sqrDrawTopButton(ctx, "log", rightX + actionW + idsW + gap * 2, topY, logW, h, "Log", false, { mode: "action", hitY: 4 });
@@ -940,7 +944,7 @@ app.registerExtension({
                     const toggleAreaX = 7;
                     const toggleAreaRight = Math.max(toggleAreaX, rightX - 8);
                     const toggleAreaW = Math.max(0, toggleAreaRight - toggleAreaX);
-                    const toggleW = Math.max(58, Math.min(92, (toggleAreaW - gap * 3) / 4));
+                    const toggleW = 112;
                     const totalW = toggleW * 4 + gap * 3;
                     const midX = toggleAreaX + Math.max(0, (toggleAreaW - totalW) / 2);
                     const multiRefOn = !!multiRefW?.value;
@@ -1273,7 +1277,7 @@ app.registerExtension({
                 _minH() { return 20 + 16; },
                 _getHeaderH(node) { let h = LiteGraph.NODE_TITLE_HEIGHT ?? 26; for (const w of (node.widgets || [])) { if (w === this) break; const sz = w.computeSize ? w.computeSize(node.size[0]) : [0, LiteGraph.NODE_WIDGET_HEIGHT ?? 20]; h += (sz[1] ?? 20) + 4; } return h; },
                 _getAvailH(node, width) { const headerH = this._getHeaderH(node); const totalH = node.size[1] || 300; return Math.max(this._minH(), totalH - headerH - 8); },
-                _calcLayout(width, availH) { const n = this._paths.length; if (!n) return { rows: 0, cols: 0, slot: 48, n }; const gap = 6, pad = 8; const MIN_SLOT = 38, MAX_SLOT = 800; const aW = width - pad * 2; const aH = availH - 16; let bestSlot = MIN_SLOT, bestRows = 1, bestCols = n; for (let r = 1; r <= n; r++) { const c = Math.ceil(n / r); const slotByW = Math.floor((aW - gap*(c-1)) / c); const slotByH = Math.floor((aH - gap*(r-1)) / r); const slot = Math.min(slotByW, slotByH, MAX_SLOT); if (slot >= MIN_SLOT && slot > bestSlot) { bestSlot = slot; bestRows = r; bestCols = c; } } return { rows: bestRows, cols: bestCols, slot: bestSlot, n }; },
+                _calcLayout(width, availH) { const n = this._paths.length; if (!n) return { rows: 0, cols: 0, slot: 48, n }; const gap = 6, pad = 8; const MIN_SLOT = 54, MAX_SLOT = 150; const aW = width - pad * 2; const preferredCols = Math.min(5, Math.max(2, n)); let cols = Math.min(preferredCols, Math.max(2, Math.floor((aW + gap) / (MIN_SLOT + gap)))); cols = Math.max(1, Math.min(cols, n)); let rows = Math.ceil(n / cols); let slot = Math.floor((aW - gap * (cols - 1)) / cols); slot = Math.max(MIN_SLOT, Math.min(MAX_SLOT, slot)); const maxRowsByHeight = Math.max(1, Math.floor((Math.max(this._minH(), availH) - 16 + gap) / (MIN_SLOT + gap))); while (rows > maxRowsByHeight && cols < Math.min(5, n)) { cols++; rows = Math.ceil(n / cols); slot = Math.floor((aW - gap * (cols - 1)) / cols); slot = Math.max(MIN_SLOT, Math.min(MAX_SLOT, slot)); } return { rows, cols, slot, n }; },
                 _layout(width) { const availH = this._getAvailH(node, width); const { rows, cols, slot, n } = this._calcLayout(width, availH); const gap = 6, pad = 8, padV = 8; const totalW = cols * slot + (cols-1) * gap; const ox = pad + Math.max(0, (width - pad*2 - totalW) / 2); return this._paths.map((p, i) => { const col = i % cols, row = Math.floor(i / cols); const x = ox + col * (slot + gap); const y = padV + row * (slot + gap); return { p, x, y: y, w: slot, h: slot }; }); },
                 draw(ctx, node, width, y) {
                     if (!this._paths.length) return;
