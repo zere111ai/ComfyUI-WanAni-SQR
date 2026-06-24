@@ -1,9 +1,32 @@
-# ComfyUI-WanAni-SQR
+﻿# ComfyUI-WanAni-SQR
 
 # [简体中文](README_CN.md) 
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUN-24
+
+## Summary--
+Improve WanAni SQR state reliability, SCAIL-2 transition shape safety, multi-reference mask pairing, and resolution preset clarity.
+
+## Description--
+This update focuses on stability and workflow safety after the recent SCAIL-2 multi-reference and segmented transition work.
+
+Changes include:
+- Fixed Resume Video behavior so a stored resume path only takes effect when Resume is explicitly enabled.
+- Improved frontend state persistence around resume selection, workflow switching, and top toggle button alignment.
+- Added safer boolean/integer parsing for older workflows or widget-order edge cases.
+- Prevented invalid empty segment generation when segment count exceeds usable frame count.
+- Added standard and smaller `safe` resolution presets to `LH Resolution Setting`, with explicit width x height labels and bilingual landscape/portrait options.
+- Aligned SCAIL-2 reference and driving masks to actual latent dimensions to avoid shape mismatches such as `53 vs 54`.
+- Repeated the last available reference mask when a multi-reference batch has more images than masks.
+- Updated WanAnimate transition latent sizing to follow actual VAE-encoded dimensions.
+- Added a dedicated internal full-segment transition source per segment so later segments can reliably use the previous segment as transition material.
+
+Safe resolution note:
+- Standard presets are preserved, for example `16:9 1080p - 1920 x 1080`.
+- Extra safe presets are slightly smaller and aligned to safer multiples, for example `16:9 1080p safe - 1920 x 1072`.
+- For SCAIL-2 and WanAnimate transition workflows, width and height values divisible by 16 are recommended; 32-multiple sizes are even safer.
 ## Update 2026-JUN-21
 
 ## Summary--
@@ -121,3 +144,4 @@ FX-FeiHou & XueZi & wuwukaka
 
 ## 📄 License
 MIT License
+
