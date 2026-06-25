@@ -514,6 +514,54 @@ def find_multi_reference_node(prompt: dict) -> str | None:
     return None
 
 
+def _sqr_rewire_image_output(prompt: dict, old_ref, new_ref):
+    changed = 0
+    for nid, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            continue
+        for key, value in list(inputs.items()):
+            if value == old_ref:
+                inputs[key] = new_ref
+                changed += 1
+    return changed
+
+
+def _sqr_add_to_input_or_linked_value(prompt: dict, node_id: str, input_name: str, delta: int):
+    try:
+        delta = int(delta)
+    except Exception:
+        return False, ""
+    if delta == 0 or node_id not in prompt:
+        return False, ""
+    inputs = prompt.get(node_id, {}).get("inputs", {})
+    if not isinstance(inputs, dict) or input_name not in inputs:
+        return False, ""
+    value = inputs.get(input_name)
+    if isinstance(value, int):
+        inputs[input_name] = value + delta
+        return True, f"{node_id}.{input_name}: {value}->{inputs[input_name]}"
+    if isinstance(value, float) and value.is_integer():
+        inputs[input_name] = int(value) + delta
+        return True, f"{node_id}.{input_name}: {int(value)}->{inputs[input_name]}"
+    if isinstance(value, list) and value:
+        linked_id = str(value[0])
+        linked = prompt.get(linked_id, {})
+        linked_inputs = linked.get("inputs", {}) if isinstance(linked, dict) else {}
+        if isinstance(linked_inputs, dict):
+            for key in ("value", "int", "length", "frame_count", "frames"):
+                linked_value = linked_inputs.get(key)
+                if isinstance(linked_value, int):
+                    linked_inputs[key] = linked_value + delta
+                    return True, f"{linked_id}.{key}: {linked_value}->{linked_inputs[key]}"
+                if isinstance(linked_value, float) and linked_value.is_integer():
+                    linked_inputs[key] = int(linked_value) + delta
+                    return True, f"{linked_id}.{key}: {int(linked_value)}->{linked_inputs[key]}"
+    return False, f"{node_id}.{input_name}"
+
+
 def _sqr_node_supports_transition(prompt: dict, node_id: str) -> tuple[bool, str]:
     node = prompt.get(node_id, {}) if node_id else {}
     class_type = node.get("class_type", "") if isinstance(node, dict) else ""
@@ -644,6 +692,7 @@ def interrupt_current(host=None):
 TRANSITION_FRAMES = 32
 SCAIL2_TRANSITION_FRAMES = 17
 KEEP_FULL_TRANSITION_IN_MERGE = True
+MULTI_REF_STARTUP_TRIM_FRAMES = 9
 
 
 def _sqr_transition_frame_count(class_type: str) -> int:
@@ -753,6 +802,59 @@ class SQRReplaceBatchPrefix:
                 ).clamp(0.0, 1.0).to(suffix.dtype)
 
         return (torch.cat((prefix, suffix), dim=0),)
+
+
+class SQRImageBatchConcat:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images_a": ("IMAGE",),
+                "images_b": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "concat"
+    CATEGORY = "video/utils"
+
+    def concat(self, images_a, images_b):
+        import torch
+        if images_a.shape[0] == 0:
+            return (images_b,)
+        if images_b.shape[0] == 0:
+            return (images_a,)
+        if images_a.shape[1:3] != images_b.shape[1:3]:
+            images_b = torch.nn.functional.interpolate(
+                images_b.movedim(-1, 1),
+                size=images_a.shape[1:3],
+                mode="area",
+            ).movedim(1, -1)
+        images_b = images_b.to(device=images_a.device, dtype=images_a.dtype)
+        return (torch.cat((images_a, images_b), dim=0),)
+
+
+class SQRRepeatFirstFrames:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "repeat_count": ("INT", {"default": 9, "min": 0, "max": 128}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "execute"
+    CATEGORY = "video/utils"
+
+    def execute(self, images, repeat_count):
+        import torch
+        repeat_count = max(0, int(repeat_count))
+        if repeat_count <= 0 or images.shape[0] == 0:
+            return (images,)
+        prefix = images[:1].repeat((repeat_count, 1, 1, 1))
+        return (torch.cat((prefix, images), dim=0),)
 
 
 def merge_videos(video_paths: list, output_path: str, target_fps: float = None,
@@ -871,6 +973,8 @@ class SegmentQueueRunner:
                     "tooltip": "Multi Ref OFF keeps the original per-segment reference mode. Multi Ref ON loads the selected references as one single-person multi-reference batch for every segment."}),
                 "replacement_enabled": ("BOOLEAN", {"default": False,
                     "tooltip": "Replacement OFF/ON syncs SCAIL-2 colored mask and transition replacement_mode."}),
+                "multi_ref_startup_fix": ("BOOLEAN", {"default": False,
+                    "tooltip": "OFF = legacy Multi Ref timing. ON = prepend repeated first frames for SCAIL-2 Multi Ref and trim them from the visible output to reduce reference-image flashes."}),
                 "sqr_save_png":      ("STRING", {"default": "true"}),
                 "sqr_frame_offset":  ("INT",    {"default": -1}),
                 "sqr_pre_segments":  ("STRING", {"default": ""}),
@@ -888,6 +992,7 @@ class SegmentQueueRunner:
             分段参考图, 续跑视频路径,
             multi_ref_enabled=False,
             replacement_enabled=False,
+            multi_ref_startup_fix=False,
             sqr_save_png="true",
             sqr_frame_offset=-1,
             sqr_pre_segments="",
@@ -899,6 +1004,7 @@ class SegmentQueueRunner:
         transition_enabled = _sqr_to_bool(启用过渡效果)
         multi_ref_enabled  = _sqr_to_bool(multi_ref_enabled)
         replacement_enabled = _sqr_to_bool(replacement_enabled)
+        multi_ref_startup_fix = _sqr_to_bool(multi_ref_startup_fix)
         node_id            = 参考视频节点ID.strip()
         frame_rate         = 帧率
         combine_nid        = 输出节点ID.strip()
@@ -984,9 +1090,12 @@ class SegmentQueueRunner:
             if _node.get("class_type") in ("SQRScail2ColoredMaskAdvanced", "SQRSCAIL2TransitionToVideo"):
                 _node.setdefault("inputs", {})["replacement_mode"] = replacement_enabled
             if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
-                _node.setdefault("inputs", {})["identity_mode"] = (
-                    "single_person_multi_reference" if multi_ref_enabled else "multi_person"
-                )
+                _inputs = _node.setdefault("inputs", {})
+                current_identity = _inputs.get("identity_mode")
+                if multi_ref_enabled and current_identity == "multi_person_multi_reference":
+                    _inputs["identity_mode"] = "multi_person_multi_reference"
+                else:
+                    _inputs["identity_mode"] = "single_person_multi_reference" if multi_ref_enabled else "multi_person"
 
         ae_nid = ae_node_id or find_animate_embeds_node(base_prompt) or ""
         vc_nid = find_video_combine_node(base_prompt, combine_nid) or ""
@@ -1151,6 +1260,23 @@ class SegmentQueueRunner:
                 use_transition = (last_video_path is not None or _latent_transition_name is not None) and transition_supported
                 continuity_mode = "transition-on" if transition_enabled else "transition-off"
                 log(f"  接缝调试: mode={continuity_mode} supported={transition_supported} class={_ae_class_type} replacement={_sqr_replacement_mode} last_latent={last_latent_name or 'None'} last_video={os.path.basename(last_video_path) if last_video_path else 'None'} use_carry={use_transition}")
+                startup_trim_frames = 0
+                startup_trim_reason = ""
+                if multi_ref_startup_fix and multi_ref_enabled and ref_images_list and _ae_class_type == "SQRSCAIL2TransitionToVideo":
+                    if use_transition:
+                        log("  Multi Ref startup fix: skipped on transition segment to avoid duplicated seam motion")
+                    elif seg_num == 1:
+                        startup_trim_reason = "first segment"
+                    elif ref_image_groups:
+                        cur_group_index = min(i, len(ref_image_groups) - 1)
+                        prev_group_index = min(max(0, i - 1), len(ref_image_groups) - 1)
+                        cur_group_sig = tuple(ref_image_groups[cur_group_index])
+                        prev_group_sig = tuple(ref_image_groups[prev_group_index])
+                        if cur_group_sig != prev_group_sig:
+                            startup_trim_reason = "reference group changed"
+                    if startup_trim_reason:
+                        startup_trim_frames = MULTI_REF_STARTUP_TRIM_FRAMES
+                        log(f"  Multi Ref startup fix: repeat_prefix={startup_trim_frames} trim_after_prefix={startup_trim_frames} reason={startup_trim_reason}")
                 _transition_frames_for_load = 0
                 _video_skip = max(0, _actual_skip - _transition_frames_for_load)
                 _video_limit = limit + (_actual_skip - _video_skip)
@@ -1163,6 +1289,30 @@ class SegmentQueueRunner:
 
                 wf[node_id]["inputs"]["skip_first_frames"] = main_ref_skip_first + _video_skip
                 wf[node_id]["inputs"]["frame_load_cap"]    = _video_limit
+                if startup_trim_frames > 0:
+                    length_ok, length_note = _sqr_add_to_input_or_linked_value(
+                        wf, ae_nid, "length", startup_trim_frames
+                    )
+                    if length_ok:
+                        log(f"  Multi Ref startup fix: extended generation length by {startup_trim_frames} ({length_note})")
+                    else:
+                        forced_length = limit + startup_trim_frames
+                        if ae_nid and ae_nid in wf:
+                            wf[ae_nid].setdefault("inputs", {})["length"] = forced_length
+                            log(f"  Multi Ref startup fix: forced generation length={forced_length} ({length_note})")
+                        else:
+                            log(f"  ⚠ Multi Ref startup fix: could not extend generation length ({length_note})")
+                    startup_repeat_id = f"sqr_startup_repeat_{seg_num}"
+                    wf[startup_repeat_id] = {
+                        "class_type": "SQRRepeatFirstFrames",
+                        "inputs": {
+                            "images": [node_id, 0],
+                            "repeat_count": startup_trim_frames,
+                        },
+                    }
+                    rewired = _sqr_rewire_image_output(wf, [node_id, 0], [startup_repeat_id, 0])
+                    wf[startup_repeat_id]["inputs"]["images"] = [node_id, 0]
+                    log(f"  Multi Ref startup fix: repeated first frame x{startup_trim_frames}; rewired_image_links={rewired}")
 
                 if vc_nid and vc_nid in wf and audio_filename:
                     _real_skip = main_ref_skip_first + skip + _frame_offset
@@ -1317,7 +1467,7 @@ class SegmentQueueRunner:
 
                 TRIM = 16
                 is_last_seg = (seg_num == total_segs)
-                total_raw = limit + (transition_added_frames if use_transition else 0)
+                total_raw = limit + startup_trim_frames + (transition_added_frames if use_transition else 0)
 
                 image_src = image_src_node
                 if use_transition and transition_image_node is not None:
@@ -1353,16 +1503,38 @@ class SegmentQueueRunner:
                     log(f"  core裁切：不做过渡裁切，输出{trim_len}帧")
                 elif KEEP_FULL_TRANSITION_IN_MERGE:
                     tail_trim = 0 if is_last_seg else transition_added_frames
-                    trim_start = 0
-                    trim_len = max(1, total_raw - tail_trim)
-                    ifb_a = f"sqr_ifb_{seg_num}_a"
-                    wf[ifb_a] = {"class_type": "ImageFromBatch",
-                                 "inputs": {"image": image_src, "batch_index": trim_start, "length": trim_len}}
-                    final_image_node = ifb_a
+                    trim_start = startup_trim_frames
+                    trim_len = max(1, total_raw - tail_trim - startup_trim_frames)
+                    if startup_trim_frames > 0 and use_transition and transition_added_frames > 0:
+                        prefix_len = min(transition_added_frames, trim_len)
+                        body_len = max(0, trim_len - prefix_len)
+                        if body_len > 0:
+                            ifb_prefix = f"sqr_ifb_{seg_num}_startup_prefix"
+                            ifb_body = f"sqr_ifb_{seg_num}_startup_body"
+                            concat_node = f"sqr_concat_{seg_num}_startup"
+                            wf[ifb_prefix] = {"class_type": "ImageFromBatch",
+                                              "inputs": {"image": image_src, "batch_index": 0, "length": prefix_len}}
+                            wf[ifb_body] = {"class_type": "ImageFromBatch",
+                                            "inputs": {"image": image_src, "batch_index": transition_added_frames + startup_trim_frames, "length": body_len}}
+                            wf[concat_node] = {"class_type": "SQRImageBatchConcat",
+                                               "inputs": {"images_a": [ifb_prefix, 0], "images_b": [ifb_body, 0]}}
+                            final_image_node = concat_node
+                        else:
+                            ifb_a = f"sqr_ifb_{seg_num}_a"
+                            wf[ifb_a] = {"class_type": "ImageFromBatch",
+                                         "inputs": {"image": image_src, "batch_index": 0, "length": trim_len}}
+                            final_image_node = ifb_a
+                    else:
+                        ifb_a = f"sqr_ifb_{seg_num}_a"
+                        wf[ifb_a] = {"class_type": "ImageFromBatch",
+                                     "inputs": {"image": image_src, "batch_index": trim_start, "length": trim_len}}
+                        final_image_node = ifb_a
                     if use_transition:
                         log(f"  裁切：读取{transition_frames}帧过渡（有效新增{transition_added_frames}帧），裁后{tail_trim}帧→输出{trim_len}帧")
                     else:
                         log(f"  裁切：不裁前，裁后{tail_trim}帧→输出{trim_len}帧")
+                    if startup_trim_frames > 0:
+                        log(f"  Multi Ref startup fix: hidden_startup_frames={startup_trim_frames}, visible_output={trim_len}")
                 elif not use_transition:
                     trim_start = 0
                     trim_len   = total_raw - TRIM
@@ -1395,9 +1567,24 @@ class SegmentQueueRunner:
                 if vc_nid and vc_nid in wf:
                     wf[vc_nid]["inputs"]["images"] = image_src
 
+                    full_image_node = image_src
+                    if startup_trim_frames > 0:
+                        full_align_id = f"sqr_ifb_{seg_num}_full_startup_aligned"
+                        full_align_len = max(1, limit + (transition_added_frames if use_transition else 0))
+                        wf[full_align_id] = {
+                            "class_type": "ImageFromBatch",
+                            "inputs": {
+                                "image": image_src,
+                                "batch_index": startup_trim_frames,
+                                "length": full_align_len,
+                            },
+                        }
+                        full_image_node = [full_align_id, 0]
+                        log(f"  Multi Ref startup fix: transition source aligned from frame {startup_trim_frames}, length={full_align_len}")
+
                     full_vc_id = f"sqr_full_vc_{seg_num}"
                     full_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
-                    full_inputs["images"] = image_src
+                    full_inputs["images"] = full_image_node
                     full_inputs["save_output"] = True
                     full_inputs["save_metadata"] = False
 
@@ -1698,11 +1885,14 @@ NODE_CLASS_MAPPINGS = {
     "WanAniSQRSegmentQueue": SegmentQueueRunner,
     "WanAniDirector": WanAniDirector,
     "SQRReplaceBatchPrefix": SQRReplaceBatchPrefix,
+    "SQRImageBatchConcat": SQRImageBatchConcat,
+    "SQRRepeatFirstFrames": SQRRepeatFirstFrames,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanAniSQRSegmentQueue": "WanAni SQR",
     "WanAniDirector": "WAN ANI DIRECTOR",
     "SQRReplaceBatchPrefix": "SQR Replace Batch Prefix",
+    "SQRRepeatFirstFrames": "SQR Repeat First Frames",
 }
 
 

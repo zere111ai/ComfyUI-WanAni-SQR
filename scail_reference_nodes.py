@@ -338,13 +338,13 @@ class SQRScail2ColoredMaskAdvanced:
         return {
             "required": {
                 "driving_track_data": ("SAM3_TRACK_DATA",),
-                "identity_mode": (["multi_person", "single_person_multi_reference"], {"default": "multi_person"}),
+                "identity_mode": (["multi_person", "single_person_multi_reference", "multi_person_multi_reference"], {"default": "multi_person"}),
                 "object_indices": ("STRING", {"default": ""}),
                 "sort_by": (["none", "left_to_right", "area"], {"default": "left_to_right"}),
                 "replacement_mode": ("BOOLEAN", {"default": False}),
                 "ref_identity_groups": ("STRING", {
                     "default": "",
-                    "tooltip": "multi_person only: group reference objects with '|', e.g. 0,1|2,3. single_person_multi_reference forces all selected reference objects to color 1.",
+                    "tooltip": "multi_person/multi_person_multi_reference: group reference objects with '|', e.g. 0,1|2,3. single_person_multi_reference forces all selected reference objects to color 1.",
                 }),
             },
             "optional": {

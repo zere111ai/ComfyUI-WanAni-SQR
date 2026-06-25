@@ -1,8 +1,36 @@
-﻿# ComfyUI-WanAni-SQR
+# ComfyUI-WanAni-SQR
 
 # [简体中文](README_CN.md) 
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
+
+## Update 2026-JUN-26
+
+## Summary--
+Add a production-tested SCAIL-2 Multi Reference segment workflow with grouped references, bilingual controls, startup flash suppression, and safer transition continuity.
+
+## Description--
+This update focuses on the new SCAIL-2 multi-reference segmented queue path and the issues found during longer real workflow tests.
+
+Changes include:
+- Added grouped Multi Reference support inside `WanAni SQR`, allowing each segment to use its own ordered reference image group while keeping the normal segmented queue flow.
+- Added `Wan SQR Multi Reference` improvements for width/height input, crop-to-video-aspect handling, keep mode, and optional `match and fill` padding for mixed-size reference images.
+- Added `LH Resolution Setting` with bilingual landscape/portrait choices, standard presets, and slightly smaller `safe` presets from 480p upward.
+- Added top-bar toggles for Multi Ref, Startup Fix, Replacement, and Transition, plus a `中/EN` language switch for the WanAni SQR interface.
+- Synced Multi Ref and Replacement toggles to SCAIL-2 colored mask identity/replacement behavior.
+- Added single-person multi-reference and multi-person multi-reference colored mask modes, with preview support for every reference mask instead of only the first mask.
+- Added a Startup Fix path for SCAIL-2 Multi Reference: the first segment can prepend 9 repeated first frames, extend generation length, then hide those startup frames from the visible output to reduce reference-image flashes.
+- Aligned the internal transition source after Startup Fix so later segments use the visible timeline instead of the hidden startup buffer.
+- Preserved 17/16-frame SCAIL-2 transition behavior while avoiding duplicated motion on transition segments.
+- Improved latent/RGB transition handling for SCAIL-2 segmented runs, including safer latent carry and transition source preparation.
+- Improved frontend state persistence so workflow switching is less likely to reset toggles, selected images, or resume-video state.
+- Avoided extension conflicts by ensuring WanAni SQR uses its own S&R node name and by removing duplicate backup-extension loading from the active test setup.
+- Added `WAN ANI DIRECTOR` as a separate experimental director-style node without changing the existing WanAni SQR node.
+
+Testing notes:
+- The new Startup Fix path is intended for SCAIL-2 Multi Reference runs where reference images may briefly flash at the beginning.
+- For normal transition segments, Startup Fix is skipped so the 17/16 transition path remains responsible for motion continuity.
+- If a workflow appears to lose the new UI controls after updating, restart ComfyUI and clear browser cache; duplicate backup copies of this extension inside `custom_nodes` can load older frontend scripts.
 
 ## Update 2026-JUN-24
 
@@ -27,36 +55,8 @@ Safe resolution note:
 - Standard presets are preserved, for example `16:9 1080p - 1920 x 1080`.
 - Extra safe presets are slightly smaller and aligned to safer multiples, for example `16:9 1080p safe - 1920 x 1072`.
 - For SCAIL-2 and WanAnimate transition workflows, width and height values divisible by 16 are recommended; 32-multiple sizes are even safer.
-## Update 2026-JUN-21
 
-## Summary--
-Add segmented multi-reference grouping controls, synchronized SCAIL-2 mode toggles, persistent WanAni SQR UI state, and robust multi-reference image size handling.
-## Description--
-This update improves WanAni SQR multi-reference workflows for SCAIL-2 segmented generation. The SQR node now supports grouped reference images per segment, with each segment able to receive its own multi-reference set. Multi Ref ON/OFF synchronizes SCAIL-2 Colored Mask identity mode between single_person_multi_reference and multi_person, while the new Replacement ON/OFF button synchronizes replacement_mode across the advanced colored mask and SCAIL-2 transition nodes. The SQR frontend state is persisted more reliably when switching workflows, reducing unexpected toggle resets, missing images, or resume-video activation.
-Wan SQR Multi Reference now includes match_and_fill, which pads mixed-size reference images to the largest group canvas using a white background before keep/crop processing. This prevents mixed-resolution reference batches from failing in keep mode while preserving image content without scaling.
-
-
-## New Nodes 2026-JUN-17
-
-Add SCAIL-2 multi-reference support to WanAni SQR with segment-queue integration and resolution-aware reference handling.
-Description
-This update adds an experimental SCAIL-2 multi-reference pipeline for WanAni SQR.
-
-Changes include:
-Added Wan SQR Multi Reference node for ordered multi-image reference batching.
-Added LH Resolution Setting node with landscape/portrait presets, common aspect ratios, 480p-to-4K options, and manual width/height override.
-Added Multi Ref ON/OFF toggle to the WanAni SQR top bar.
-When Multi Ref ON, WanAni SQR now sends its selected reference image list into Wan SQR Multi Reference in order.
-When Multi Ref OFF, WanAni SQR keeps the original per-segment single-reference behavior.
-Added SCAIL-2 colored mask advanced mode for single-person multi-reference and multi-person grouping.
-Added official-style SCAIL-2 additional reference image/mask support.
-Added reference batch splitting for main reference and additional references.
-Fixed SCAIL-2 context-window mask slicing for multi-reference timelines.
-Updated SCAIL-2 transition handling to use the 17/16 frame transition path with latent carry support.
-Improved reference mask preview so all reference masks can be viewed, not only the main reference mask.
-Updated frontend node ID selection and SQR controls for multi-reference workflows.
-
-## Integrated Transition Nodes 2026-JUN-14
+## Integrated Transition Nodes
 
 The functionality previously provided by the separate `SQR-WAN-Transition`
 plugin is now included directly in this project:
@@ -84,15 +84,6 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/zere111ai/ComfyUI-WanAni-SQR.git
 
 ## 📢 Changelog
-
-### 20260614
-中文：
-新增 SCAIL2 Transition 节点识别与动态过渡时长支持。队列会根据 WanAnimate 或 SCAIL2 自动调整过渡视频读取、裁切、合并及音频偏移，同时包含节点界面、图片加载和 Node ID 稳定性优化。
-
-English:
-Added SCAIL2 Transition node detection and model-specific transition timing. The queue now automatically adjusts transition loading, trimming, merging, and audio offsets for WanAnimate and SCAIL2, with additional UI, image loading, and Node ID reliability improvements.
-
-
 
 ### [v2.4] - 2026-04-06
 **Core Update: Adaptive Enhancement & UI/UX Optimization**
@@ -144,4 +135,3 @@ FX-FeiHou & XueZi & wuwukaka
 
 ## 📄 License
 MIT License
-

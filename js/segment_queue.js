@@ -16,7 +16,7 @@ function sqrParseRefGroups(value) {
             if (Array.isArray(parsed)) {
                 if (parsed.some(v => Array.isArray(v))) {
                     return parsed.map(group => Array.isArray(group) ? group : [group])
-                        .map(group => group.map(v => String(v).trim()).filter(Boolean).slice(0, 5))
+                        .map(group => group.map(v => String(v).trim()).filter(Boolean))
                         .filter(group => group.length);
                 }
                 const flat = parsed.map(v => String(v).trim()).filter(Boolean);
@@ -43,7 +43,7 @@ function sqrParseRefPaths(value) {
 
 function sqrStoreRefGroups(groups) {
     const cleaned = (groups || [])
-        .map(group => (Array.isArray(group) ? group : [group]).map(v => String(v).trim()).filter(Boolean).slice(0, 5))
+        .map(group => (Array.isArray(group) ? group : [group]).map(v => String(v).trim()).filter(Boolean))
         .filter(group => group.length);
     if (cleaned.length <= 1) return JSON.stringify(cleaned[0] || []);
     return JSON.stringify(cleaned);
@@ -423,7 +423,7 @@ app.registerExtension({
             const r = origCreated ? origCreated.apply(this, arguments) : undefined;
             const node = this;
             const getW = name => node.widgets?.find(w => w.name === name);
-            const SQR_TOPBAR_MIN_WIDTH = 760;
+            const SQR_TOPBAR_MIN_WIDTH = 900;
             if (node.size) node.size[0] = Math.max(node.size[0] || 0, SQR_TOPBAR_MIN_WIDTH);
 
             const sqrKeys = ["参考图节点ID","参考视频节点ID","输出节点ID","动作嵌入节点ID","分段参考图","续跑视频路径"];
@@ -449,6 +449,8 @@ app.registerExtension({
 
             const segW = getW("分段数");
             const startW = getW("从第几段开始");
+            let segUiW = null;
+            let startUiW = null;
             let multiRefW = getW("multi_ref_enabled");
             if (!multiRefW) {
                 multiRefW = node.addWidget("toggle", "multi_ref_enabled", false, () => {
@@ -462,6 +464,13 @@ app.registerExtension({
                     node.setDirtyCanvas?.(true, true);
                 });
                 replacementW.serialize = true;
+            }
+            let startupFixW = getW("multi_ref_startup_fix");
+            if (!startupFixW) {
+                startupFixW = node.addWidget("toggle", "multi_ref_startup_fix", false, () => {
+                    node.setDirtyCanvas?.(true, true);
+                });
+                startupFixW.serialize = true;
             }
             let transitionW = getW("启用过渡效果");
             if (!transitionW) {
@@ -489,6 +498,10 @@ app.registerExtension({
                 replacementW.computeSize = () => [0, -4];
                 replacementW.draw = () => {};
             }
+            if (startupFixW) {
+                startupFixW.computeSize = () => [0, -4];
+                startupFixW.draw = () => {};
+            }
 
             function _sqrApplySegMax() {
                 const maxVal = Math.max(2, Math.min(100, node._sqrSettings?.segMax || 100));
@@ -496,10 +509,19 @@ app.registerExtension({
                     segW.options.max = maxVal;
                     if (segW.value > maxVal) segW.value = maxVal;
                 }
+                if (segUiW) {
+                    segUiW.options.max = maxVal;
+                    segUiW.value = segW ? Number(segW.value || 1) : Number(segUiW.value || 1);
+                }
                 if (startW) {
                     const curSeg = segW ? Math.max(1, Math.round(segW.value)) : maxVal;
                     startW.options.max = curSeg;
                     if (startW.value > curSeg) startW.value = curSeg;
+                }
+                if (startUiW) {
+                    const curSeg = segW ? Math.max(1, Math.round(segW.value)) : maxVal;
+                    startUiW.options.max = curSeg;
+                    startUiW.value = startW ? Number(startW.value || 1) : Number(startUiW.value || 1);
                 }
                 node.setDirtyCanvas?.(true, true);
             }
@@ -538,6 +560,7 @@ app.registerExtension({
             }
 
             const SQR_NODE_ID_KEYS = ["参考图节点ID", "参考视频节点ID", "输出节点ID", "动作嵌入节点ID"];
+            let execW = getW("执行");
             const getSqrStateWidgets = () => {
                 const names = new Set([...sqrKeys, "sqr_save_png", "sqr_frame_offset", "sqr_pre_segments"]);
                 const widgets = [];
@@ -545,7 +568,7 @@ app.registerExtension({
                     const w = getW(name);
                     if (w) widgets.push(w);
                 }
-                for (const w of [transitionW, multiRefW, replacementW, execW, resumeToggle, segW, startW]) {
+                for (const w of [transitionW, multiRefW, replacementW, startupFixW, execW, resumeToggle, segW, startW]) {
                     if (w && !widgets.includes(w)) widgets.push(w);
                 }
                 return widgets;
@@ -650,6 +673,7 @@ app.registerExtension({
                 data.properties ||= {};
                 data.properties.sqr_node_ids = { ...ids };
                 data.properties.sqr_state = { ...state };
+                data.properties.sqr_ui_lang = node._sqrSettings?.lang || "en";
             };
 
             const _origSqrConfigure = node.onConfigure;
@@ -683,20 +707,204 @@ app.registerExtension({
             const _SQR_PNG_KEY   = "sqr_save_png";
             const _SQR_SEGMAX_KEY = "sqr_seg_max";
             const _SQR_EXECGLOW_KEY = "sqr_exec_glow";
+            const _SQR_LANG_KEY = "sqr_ui_lang";
             if (!node._sqrSettings) {
                 const savedPng  = localStorage.getItem(_SQR_PNG_KEY);
                 const savedSegMax = localStorage.getItem(_SQR_SEGMAX_KEY);
                 const savedExecGlow = localStorage.getItem(_SQR_EXECGLOW_KEY);
+                const savedLang = localStorage.getItem(_SQR_LANG_KEY);
                 node._sqrSettings = {
                     savePng: savedPng === null ? true : (savedPng !== "false"),
                     segMax: savedSegMax ? parseInt(savedSegMax) : 10,
                     execGlow: savedExecGlow === null ? true : (savedExecGlow !== "false"),
+                    lang: savedLang === "zh" ? "zh" : "en",
                 };
             }
+            if (node.properties?.sqr_ui_lang === "zh" || node.properties?.sqr_ui_lang === "en") {
+                node._sqrSettings.lang = node.properties.sqr_ui_lang;
+            }
+            const _sqrText = {
+                en: {
+                    langBtn: "中",
+                    settings: "Settings",
+                    nodeIds: "Node IDs",
+                    log: "Log",
+                    multiRefOn: "Multi Ref ON",
+                    multiRefOff: "Multi Ref OFF",
+                    startupOn: "Startup Fix ON",
+                    startupOff: "Startup Fix OFF",
+                    replacementOn: "Replacement ON",
+                    replacementOff: "Replacement OFF",
+                    transitionOn: "Transition ON",
+                    transitionOff: "Transition OFF",
+                    executeMode: "Execute Mode",
+                    previewMode: "Preview Mode",
+                    settingsTitle: "WanAni SQR Settings",
+                    segmentsLabel: "Segments",
+                    startSegmentLabel: "Start Segment",
+                    segmentControls: "Segment Controls",
+                    segmentHint: "The segment slider always means the number of equal segments.",
+                    segmentMax: "Segment slider max",
+                    currentSegmentMax: "Current segment max",
+                    nodeGlow: "Node glow while Execute is ON",
+                    glowTrue: "True",
+                    glowTrueDesc: "Show green node glow while executing",
+                    glowFalse: "False",
+                    glowFalseDesc: "Do not show node glow",
+                    savePng: "Save png of first frame for metadata",
+                    pngTrue: "True",
+                    pngTrueDesc: "Save PNG",
+                    pngFalse: "False",
+                    pngFalseDesc: "Do not save PNG; clean automatically",
+                    cancel: "Cancel",
+                    apply: "Apply",
+                    refGroups: "Reference Image Groups",
+                    refGroupsHint: "Multi Ref ON: segment 1 uses group 1, segment 2 uses group 2, and so on. Each group can contain up to 5 images.",
+                    addGroup: "Add Group",
+                    flattenGroup: "Flatten To One Group",
+                    addImages: "Add Images",
+                    removeGroup: "Remove Group",
+                    emptyGroup: "Drop or add images for this segment group",
+                    refLimitExceeded: "Reference images exceed the current group limit. Extra images were moved to the next group.",
+                    selectRefs: "Select Reference Images",
+                    selectResume: "Select Resume Video",
+                    manageResume: "Manage Resume Video",
+                    viewLog: "View Log",
+                },
+                zh: {
+                    langBtn: "EN",
+                    settings: "设置",
+                    nodeIds: "节点ID",
+                    log: "日志",
+                    multiRefOn: "多参考 开",
+                    multiRefOff: "多参考 关",
+                    startupOn: "开头修复 开",
+                    startupOff: "开头修复 关",
+                    replacementOn: "替换 开",
+                    replacementOff: "替换 关",
+                    transitionOn: "过渡 开",
+                    transitionOff: "过渡 关",
+                    executeMode: "执行模式",
+                    previewMode: "预览模式",
+                    settingsTitle: "WanAni SQR 设置",
+                    segmentsLabel: "分段数",
+                    startSegmentLabel: "从第几段开始",
+                    segmentControls: "分段控制",
+                    segmentHint: "分段滑块始终表示平均分段的段数。",
+                    segmentMax: "分段滑块最大值",
+                    currentSegmentMax: "当前分段最大值",
+                    nodeGlow: "执行开启时节点发光",
+                    glowTrue: "开启",
+                    glowTrueDesc: "执行时显示绿色边框",
+                    glowFalse: "关闭",
+                    glowFalseDesc: "不显示节点发光",
+                    savePng: "保存首帧 PNG 元数据图",
+                    pngTrue: "开启",
+                    pngTrueDesc: "保存 PNG",
+                    pngFalse: "关闭",
+                    pngFalseDesc: "不保存 PNG，并自动清理",
+                    cancel: "取消",
+                    apply: "应用",
+                    refGroups: "参考图分组",
+                    refGroupsHint: "多参考开启时：第 1 段使用第 1 组，第 2 段使用第 2 组，以此类推。每组最多 5 张图。",
+                    addGroup: "添加分组",
+                    flattenGroup: "合并为一组",
+                    addImages: "添加图片",
+                    removeGroup: "删除分组",
+                    emptyGroup: "拖入或添加本段参考图",
+                    refLimitExceeded: "参考图超过当前分组上限，多出的图片已移动到下一组。",
+                    selectRefs: "选择参考图",
+                    selectResume: "选择续跑视频",
+                    manageResume: "管理续跑视频",
+                    viewLog: "查看日志",
+                },
+            };
+            const tr = key => (_sqrText[node._sqrSettings?.lang || "en"] || _sqrText.en)[key] || _sqrText.en[key] || key;
 
+            function _sqrCurrentRefGroupLimit() {
+                if (multiRefW?.value) return 5;
+                return Math.max(1, Math.min(100, Math.round(Number(node._sqrSettings?.segMax || segW?.options?.max || segW?.value || 10))));
+            }
+            function _sqrNormalizeRefGroupsForMode(groups, notify=false) {
+                const flatGroups = (groups || [])
+                    .map(group => (Array.isArray(group) ? group : [group]).map(v => String(v || "").trim()).filter(Boolean));
+                const limit = _sqrCurrentRefGroupLimit();
+                const normalized = [];
+                let overflowed = false;
+                if (multiRefW?.value) {
+                    for (const group of flatGroups.length ? flatGroups : [[]]) {
+                        for (let i = 0; i < group.length; i += limit) {
+                            const chunk = group.slice(i, i + limit);
+                            if (chunk.length) normalized.push(chunk);
+                            if (i > 0) overflowed = true;
+                        }
+                    }
+                } else {
+                    const flat = sqrFlattenRefGroups(flatGroups);
+                    for (let i = 0; i < flat.length; i += limit) {
+                        const chunk = flat.slice(i, i + limit);
+                        if (chunk.length) normalized.push(chunk);
+                        if (i > 0) overflowed = true;
+                    }
+                }
+                if (!normalized.length) normalized.push([]);
+                if (overflowed && notify) alert(tr("refLimitExceeded"));
+                return normalized;
+            }
+            function _sqrNormalizeStoredRefsForMode(notify=false) {
+                const normalized = _sqrNormalizeRefGroupsForMode(sqrParseRefGroups(getSqr(sqrKeys[4])), notify);
+                setSqr(sqrKeys[4], sqrStoreRefGroups(normalized));
+                const tw = node.widgets?.find(w => w.name === "_sqr_ref_thumbs");
+                tw?.syncPaths?.();
+                node.setDirtyCanvas?.(true, true);
+                return normalized;
+            }
+
+            function _sqrHideNativeNumberWidget(w) {
+                if (!w) return;
+                w.computeSize = () => [0, -4];
+                w.draw = () => {};
+            }
+            function _sqrSyncSegmentProxyLabels() {
+                if (segUiW) segUiW.name = tr("segmentsLabel");
+                if (startUiW) startUiW.name = tr("startSegmentLabel");
+            }
+            if (segW) {
+                segUiW = node.addWidget("number", tr("segmentsLabel"), Number(segW.value || 1), (v) => {
+                    const maxVal = Math.max(2, Math.min(100, node._sqrSettings?.segMax || 100));
+                    const iv = Math.max(1, Math.min(maxVal, Math.round(Number(v) || 1)));
+                    segUiW.value = iv;
+                    segW.value = iv;
+                    segW.callback?.(iv);
+                    if (startUiW && startW) {
+                        startUiW.options.max = iv;
+                        if (Number(startUiW.value || 1) > iv) startUiW.value = iv;
+                        startW.value = Math.min(iv, Math.max(1, Math.round(Number(startUiW.value || 1))));
+                    }
+                    persistSqrState();
+                    node.setDirtyCanvas?.(true, true);
+                }, { min: 1, max: Math.max(2, Math.min(100, node._sqrSettings?.segMax || 100)), step: 1, precision: 0 });
+                segUiW.serialize = false;
+                _sqrHideNativeNumberWidget(segW);
+            }
+            if (startW) {
+                startUiW = node.addWidget("number", tr("startSegmentLabel"), Number(startW.value || 1), (v) => {
+                    const mx = segW ? Math.max(1, Math.round(Number(segW.value) || 1)) : 100;
+                    const iv = Math.max(1, Math.min(mx, Math.round(Number(v) || 1)));
+                    startUiW.value = iv;
+                    startW.value = iv;
+                    startW.callback?.(iv);
+                    persistSqrState();
+                    node.setDirtyCanvas?.(true, true);
+                }, { min: 1, max: segW ? Math.max(1, Math.round(Number(segW.value) || 1)) : 100, step: 1, precision: 0 });
+                startUiW.serialize = false;
+                _sqrHideNativeNumberWidget(startW);
+            }
+
+            _sqrNormalizeStoredRefsForMode(false);
             _sqrApplySegMax();
 
-            const execW = getW("执行");
+            execW = execW || getW("执行");
             if (execW) {
                 execW.computeSize = () => [0, -4];
                 execW.draw = () => {};
@@ -739,7 +947,7 @@ app.registerExtension({
                     boxShadow:"0 8px 40px rgba(0,0,0,.7)"
                 });
                 const mkDiv=(t,st)=>Object.assign(document.createElement("div"),{textContent:t,style:st||""});
-                box.appendChild(mkDiv("WanAni SQR Settings","font-size:15px;font-weight:700;"));
+                box.appendChild(mkDiv(tr("settingsTitle"),"font-size:15px;font-weight:700;"));
                 const mkRemoteHint = (text) => {
                     const el = document.createElement("div");
                     Object.assign(el.style, { padding:"10px 14px", borderRadius:"8px", fontSize:"12px", lineHeight:"1.7", border:"1px solid rgba(100,180,255,0.3)", background:"rgba(60,140,255,0.08)", color:"var(--input-text,#ccc)" });
@@ -750,13 +958,13 @@ app.registerExtension({
                 const isRemote = _sqrIsRemote();
 
                 box.appendChild(Object.assign(document.createElement("div"),{style:"border-top:1px solid var(--border-color,#444);"}));
-                box.appendChild(mkDiv("Segment Controls","font-size:13px;font-weight:600;margin-bottom:2px;"));
-                box.appendChild(mkDiv("The segment slider always means the number of equal segments.","font-size:10px;opacity:.45;line-height:1.5;margin-bottom:6px;"));
+                box.appendChild(mkDiv(tr("segmentControls"),"font-size:13px;font-weight:600;margin-bottom:2px;"));
+                box.appendChild(mkDiv(tr("segmentHint"),"font-size:10px;opacity:.45;line-height:1.5;margin-bottom:6px;"));
 
                 if (!isRemote) {
                     const segMaxSection = document.createElement("div");
                     segMaxSection.style.cssText = "display:flex;align-items:center;gap:10px;margin-top:4px;";
-                    const segMaxLabel = document.createElement("span"); segMaxLabel.textContent = "Segment slider max"; segMaxLabel.style.cssText = "font-size:12px;opacity:.7;";
+                    const segMaxLabel = document.createElement("span"); segMaxLabel.textContent = tr("segmentMax"); segMaxLabel.style.cssText = "font-size:12px;opacity:.7;";
                     const segMaxInput = document.createElement("input"); segMaxInput.type = "number"; segMaxInput.min = "2"; segMaxInput.max = "100"; segMaxInput.value = String(s.segMax || 10);
                     Object.assign(segMaxInput.style, { width:"70px", padding:"5px 8px", borderRadius:"5px", border:"1px solid var(--border-color,#555)", background:"var(--comfy-input-bg,#333)", color:"var(--input-text,#eee)", fontSize:"13px" });
                     segMaxInput.onchange = () => { let v = parseInt(segMaxInput.value) || 10; v = Math.max(2, Math.min(100, v)); segMaxInput.value = v; s.segMax = v; };
@@ -764,11 +972,11 @@ app.registerExtension({
                     segMaxSection.append(segMaxLabel, segMaxInput, segMaxHint);
                     box.appendChild(segMaxSection);
                 } else {
-                    box.appendChild(mkDiv(`Current segment max: ${s.segMax}`,"font-size:12px;opacity:.7;padding:4px 0;"));
+                    box.appendChild(mkDiv(`${tr("currentSegmentMax")}: ${s.segMax}`,"font-size:12px;opacity:.7;padding:4px 0;"));
                 }
 
                 box.appendChild(Object.assign(document.createElement("div"),{style:"border-top:1px solid var(--border-color,#444);"}));
-                box.appendChild(mkDiv("Node glow while Execute is ON","font-size:11px;opacity:.5;margin-bottom:2px;"));
+                box.appendChild(mkDiv(tr("nodeGlow"),"font-size:11px;opacity:.5;margin-bottom:2px;"));
                 if (!isRemote) {
                     const glowRow = document.createElement("div"); glowRow.style.cssText = "display:flex;gap:10px;";
                     const mkGlowOpt = (value, label, desc) => {
@@ -780,28 +988,28 @@ app.registerExtension({
                         d.onclick = () => { s.execGlow = value; glowRow.querySelectorAll("div[data-glowval]").forEach(x => { const me = x.dataset.glowval === String(value); x.style.border = me ? "2px solid #4a9" : "2px solid var(--border-color,#555)"; x.style.background = me ? "rgba(60,180,120,0.12)" : "transparent"; }); };
                         return d;
                     };
-                    glowRow.append(mkGlowOpt(true, "True", "Show green node glow while executing"), mkGlowOpt(false, "False", "Do not show node glow"));
+                    glowRow.append(mkGlowOpt(true, tr("glowTrue"), tr("glowTrueDesc")), mkGlowOpt(false, tr("glowFalse"), tr("glowFalseDesc")));
                     box.appendChild(glowRow);
                 } else {
                     box.appendChild(mkDiv(`Current: ${s.execGlow ? "On" : "Off"}`,"font-size:12px;opacity:.7;padding:4px 0;"));
                 }
                 box.appendChild(Object.assign(document.createElement("div"),{style:"border-top:1px solid var(--border-color,#444);"}));
-                box.appendChild(mkDiv("Save png of first frame for metadata","font-size:11px;opacity:.5;margin-bottom:2px;"));
+                box.appendChild(mkDiv(tr("savePng"),"font-size:11px;opacity:.5;margin-bottom:2px;"));
                 if (isRemote) {
                     const pngW = getW("sqr_save_png"); if (pngW) pngW.value = "false";
                     box.appendChild(mkRemoteHint("Locked to <b style='color:#aef;'>do not save PNG</b>. Metadata images are cleaned in remote mode."));
                 } else {
                     const pngRow = document.createElement("div"); pngRow.style.cssText="display:flex;gap:10px;";
                     const mkPngOpt = (value, label, desc) => { const d = document.createElement("div"); const active = (s.savePng === value); Object.assign(d.style, { flex:"1", padding:"8px 12px", minHeight:"68px", boxSizing:"border-box", borderRadius:"8px", cursor:"pointer", border: active ? "2px solid #4a9" : "2px solid var(--border-color,#555)", background: active ? "rgba(60,180,120,0.12)" : "transparent" }); d.innerHTML = `<div style="font-size:13px;font-weight:600;">${label}</div><div style="font-size:11px;opacity:.5;margin-top:2px;">${desc}</div>`; d.dataset.pngval = String(value); d.onclick = () => { s.savePng = value; pngRow.querySelectorAll("div[data-pngval]").forEach(x => { const me = x.dataset.pngval === String(value); x.style.border = me ? "2px solid #4a9" : "2px solid var(--border-color,#555)"; x.style.background = me ? "rgba(60,180,120,0.12)" : "transparent"; }); }; return d; };
-                    pngRow.append(mkPngOpt(true,"True","Save PNG"),mkPngOpt(false,"False","Do not save PNG; clean automatically"));
+                    pngRow.append(mkPngOpt(true,tr("pngTrue"),tr("pngTrueDesc")),mkPngOpt(false,tr("pngFalse"),tr("pngFalseDesc")));
                     box.appendChild(pngRow);
                 }
 
                 const btns=document.createElement("div"); btns.style.cssText="display:flex;gap:8px;margin-top:4px;";
                 const mkBtn=(t,st,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${st}`;b.onclick=fn;return b;};
                 btns.append(
-                    mkBtn("Cancel","",()=>overlay.remove()),
-                    mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{
+                    mkBtn(tr("cancel"),"",()=>overlay.remove()),
+                    mkBtn(tr("apply"),"background:#2a9;color:#fff;border:none;font-weight:600;",()=>{
                         if (!isRemote) {
                             localStorage.setItem(_SQR_PNG_KEY, String(s.savePng));
                             localStorage.setItem(_SQR_SEGMAX_KEY, String(s.segMax));
@@ -809,6 +1017,7 @@ app.registerExtension({
                             const pngW = getW("sqr_save_png");
                             if (pngW) pngW.value = String(s.savePng);
                             _sqrApplySegMax();
+                            _sqrNormalizeStoredRefsForMode(true);
                         }
                         overlay.remove();
                         node.setDirtyCanvas?.(true, true);
@@ -908,12 +1117,15 @@ app.registerExtension({
             }
 
             function _sqrSyncMultiRefIdentityMode(value) {
-                const identityMode = value ? "single_person_multi_reference" : "multi_person";
                 const graphNodes = app.graph?._nodes || [];
                 let changed = 0;
                 for (const gnode of graphNodes) {
                     const cls = gnode?.comfyClass || gnode?.type;
                     if (cls === "SQRScail2ColoredMaskAdvanced") {
+                        const current = gnode.widgets?.find(w => w.name === "identity_mode")?.value;
+                        const identityMode = value && current === "multi_person_multi_reference"
+                            ? "multi_person_multi_reference"
+                            : (value ? "single_person_multi_reference" : "multi_person");
                         if (_sqrSetNodeInputValue(gnode, "identity_mode", identityMode)) changed++;
                     }
                 }
@@ -933,28 +1145,32 @@ app.registerExtension({
                     const h = 22;
                     const topY = y + 4;
                     const gap = 5;
+                    const langW = 34;
                     const actionW = 54;
                     const idsW = 58;
                     const logW = 42;
-                    const rightX = barW - actionW - idsW - logW - gap * 2 - 7;
-                    _sqrDrawTopButton(ctx, "settings", rightX, topY, actionW, h, "Settings", false, { mode: "action", hitY: 4 });
-                    _sqrDrawTopButton(ctx, "nodeids", rightX + actionW + gap, topY, idsW, h, "Node IDs", false, { mode: "action", hitY: 4 });
-                    _sqrDrawTopButton(ctx, "log", rightX + actionW + idsW + gap * 2, topY, logW, h, "Log", false, { mode: "action", hitY: 4 });
+                    const rightX = barW - langW - actionW - idsW - logW - gap * 3 - 7;
+                    _sqrDrawTopButton(ctx, "lang", rightX, topY, langW, h, tr("langBtn"), false, { mode: "action", hitY: 4 });
+                    _sqrDrawTopButton(ctx, "settings", rightX + langW + gap, topY, actionW, h, tr("settings"), false, { mode: "action", hitY: 4 });
+                    _sqrDrawTopButton(ctx, "nodeids", rightX + langW + actionW + gap * 2, topY, idsW, h, tr("nodeIds"), false, { mode: "action", hitY: 4 });
+                    _sqrDrawTopButton(ctx, "log", rightX + langW + actionW + idsW + gap * 3, topY, logW, h, tr("log"), false, { mode: "action", hitY: 4 });
 
                     const toggleAreaX = 7;
                     const toggleAreaRight = Math.max(toggleAreaX, rightX - 8);
                     const toggleAreaW = Math.max(0, toggleAreaRight - toggleAreaX);
                     const toggleW = 112;
-                    const totalW = toggleW * 4 + gap * 3;
+                    const totalW = toggleW * 5 + gap * 4;
                     const midX = toggleAreaX + Math.max(0, (toggleAreaW - totalW) / 2);
                     const multiRefOn = !!multiRefW?.value;
+                    const startupFixOn = !!startupFixW?.value;
                     const replacementOn = !!replacementW?.value;
                     const transOn = !!transitionW?.value;
                     const execOn = !!execW?.value;
-                    _sqrDrawTopButton(ctx, "multiref", midX, topY, toggleW, h, multiRefOn ? "Multi Ref ON" : "Multi Ref OFF", multiRefOn, { hitY: 4 });
-                    _sqrDrawTopButton(ctx, "replacement", midX + toggleW + gap, topY, toggleW, h, replacementOn ? "Replacement ON" : "Replacement OFF", replacementOn, { hitY: 4 });
-                    _sqrDrawTopButton(ctx, "transition", midX + (toggleW + gap) * 2, topY, toggleW, h, transOn ? "Transition ON" : "Transition OFF", transOn, { hitY: 4 });
-                    _sqrDrawTopButton(ctx, "execute", midX + (toggleW + gap) * 3, topY, toggleW, h, execOn ? "Execute Mode" : "Preview Mode", execOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "multiref", midX, topY, toggleW, h, multiRefOn ? tr("multiRefOn") : tr("multiRefOff"), multiRefOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "startupfix", midX + toggleW + gap, topY, toggleW, h, startupFixOn ? tr("startupOn") : tr("startupOff"), startupFixOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "replacement", midX + (toggleW + gap) * 2, topY, toggleW, h, replacementOn ? tr("replacementOn") : tr("replacementOff"), replacementOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "transition", midX + (toggleW + gap) * 3, topY, toggleW, h, transOn ? tr("transitionOn") : tr("transitionOff"), transOn, { hitY: 4 });
+                    _sqrDrawTopButton(ctx, "execute", midX + (toggleW + gap) * 4, topY, toggleW, h, execOn ? tr("executeMode") : tr("previewMode"), execOn, { hitY: 4 });
                 },
                 mouse(event, pos, nodeRef) {
                     if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
@@ -963,10 +1179,24 @@ app.registerExtension({
                         const hitWidgetLocal = x >= r.x && x <= r.x + r.w && y >= r.localY && y <= r.localY + r.h;
                         const hitNodeLocal = x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
                         if (hitWidgetLocal || hitNodeLocal) {
-                            if (key === "multiref" && multiRefW) {
+                            if (key === "lang") {
+                                node._sqrSettings.lang = node._sqrSettings.lang === "zh" ? "en" : "zh";
+                                localStorage.setItem(_SQR_LANG_KEY, node._sqrSettings.lang);
+                                node.properties ||= {};
+                                node.properties.sqr_ui_lang = node._sqrSettings.lang;
+                                _sqrSyncSegmentProxyLabels();
+                                if (typeof refBtn !== "undefined" && refBtn) refBtn.name = tr("selectRefs");
+                                if (typeof logBtn !== "undefined" && logBtn) logBtn.name = tr("viewLog");
+                                if (typeof resumeBtn !== "undefined" && resumeBtn) resumeBtn.name = resumeBtn._sqrActive ? tr("manageResume") : tr("selectResume");
+                            } else if (key === "multiref" && multiRefW) {
                                 multiRefW.value = !multiRefW.value;
                                 multiRefW.callback?.(multiRefW.value);
                                 _sqrSyncMultiRefIdentityMode(multiRefW.value);
+                                _sqrNormalizeStoredRefsForMode(true);
+                                persistSqrState();
+                            } else if (key === "startupfix" && startupFixW) {
+                                startupFixW.value = !startupFixW.value;
+                                startupFixW.callback?.(startupFixW.value);
                                 persistSqrState();
                             } else if (key === "replacement" && replacementW) {
                                 replacementW.value = !replacementW.value;
@@ -1007,6 +1237,7 @@ app.registerExtension({
                 _showLogOverlay(String(node.id));
             });
             logBtn.serialize = false;
+            logBtn.name = tr("viewLog");
             logBtn.computeSize = () => [0, -4];
             logBtn.draw = () => {};
 
@@ -1089,7 +1320,7 @@ app.registerExtension({
             resumeBtn.serialize = false;
             resumeBtn.draw = function(ctx, node, widget_width, y, H) {
                 const active = !!this._sqrActive;
-                const label = active ? "Manage Resume Video" : "Select Resume Video";
+                const label = active ? tr("manageResume") : tr("selectResume");
                 ctx.fillStyle = active ? "rgba(40,160,100,0.35)" : "rgba(255,255,255,0.05)";
                 ctx.beginPath();
                 ctx.roundRect ? ctx.roundRect(4, y+2, widget_width-8, H-4, 4) : ctx.rect(4, y+2, widget_width-8, H-4);
@@ -1181,30 +1412,54 @@ app.registerExtension({
                 const overlay = document.createElement("div");overlay.id = "sqr-mgr-overlay";Object.assign(overlay.style,{position:"fixed",inset:"0",zIndex:"10001",background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center"});
                 const box = document.createElement("div");Object.assign(box.style,{background:"var(--comfy-menu-bg,#1e1e1e)",color:"var(--input-text,#eee)",border:"1px solid var(--border-color,#444)",borderRadius:"12px",padding:"18px 22px",width:"760px",maxHeight:"88vh",display:"flex",flexDirection:"column",gap:"10px",boxShadow:"0 8px 40px rgba(0,0,0,.7)"});
                 const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
-                box.appendChild(mkDiv("Reference Image Groups","font-size:14px;font-weight:600;"));
-                box.appendChild(mkDiv("Multi Ref ON: segment 1 uses group 1, segment 2 uses group 2, and so on. Each group can contain up to 5 images.","font-size:11px;opacity:.55;line-height:1.45;"));
+                box.appendChild(mkDiv(tr("refGroups"),"font-size:14px;font-weight:600;"));
+                box.appendChild(mkDiv(tr("refGroupsHint"),"font-size:11px;opacity:.55;line-height:1.45;"));
                 const wrap = document.createElement("div");Object.assign(wrap.style,{display:"flex",flexDirection:"column",gap:"10px",minHeight:"120px",maxHeight:"520px",overflowY:"auto",padding:"10px",border:"1px solid var(--border-color,#444)",borderRadius:"8px"});
-                const normalizeGroups = () => { groups = groups.map(g => (g || []).filter(Boolean).slice(0, 5)); if (!groups.length) groups = [[]]; };
+                const normalizeGroups = (notify=false, keepEmpty=true) => {
+                    const normalized = _sqrNormalizeRefGroupsForMode(groups, notify);
+                    if (keepEmpty) {
+                        let sourceIndex = 0;
+                        const withEmpty = [];
+                        for (const raw of groups) {
+                            const cleaned = (Array.isArray(raw) ? raw : [raw]).map(v => String(v || "").trim()).filter(Boolean);
+                            if (!cleaned.length) {
+                                withEmpty.push([]);
+                            } else {
+                                const chunkCount = Math.max(1, Math.ceil(cleaned.length / _sqrCurrentRefGroupLimit()));
+                                for (let i = 0; i < chunkCount && sourceIndex < normalized.length; i++) {
+                                    withEmpty.push(normalized[sourceIndex++]);
+                                }
+                            }
+                        }
+                        while (sourceIndex < normalized.length) withEmpty.push(normalized[sourceIndex++]);
+                        groups = withEmpty.length ? withEmpty : [[]];
+                    } else {
+                        groups = normalized.filter(group => group.length);
+                        if (!groups.length) groups = [[]];
+                    }
+                };
                 function moveImage(gidx, idx, dir) {
                     const target = gidx + dir;
                     if (target < 0 || target >= groups.length) return;
-                    if ((groups[target] || []).length >= 5) { alert("Target group already has 5 images."); return; }
+                    const limit = _sqrCurrentRefGroupLimit();
+                    if ((groups[target] || []).length >= limit) { alert(tr("refLimitExceeded")); return; }
                     const [img] = groups[gidx].splice(idx, 1);
                     groups[target].push(img);
                     renderGroups();
                 }
                 function renderGroups() {
-                    normalizeGroups();
+                    normalizeGroups(false, true);
                     wrap.innerHTML = "";
+                    const groupLimit = _sqrCurrentRefGroupLimit();
                     groups.forEach((group, gidx) => {
                         const panel = document.createElement("div");Object.assign(panel.style,{border:"1px solid var(--border-color,#555)",borderRadius:"8px",padding:"8px",background:"rgba(255,255,255,0.025)"});
                         const header = document.createElement("div");Object.assign(header.style,{display:"flex",alignItems:"center",gap:"8px",marginBottom:"8px"});
-                        header.appendChild(mkDiv(`Group ${gidx+1} - ${group.length}/5`,`font-size:12px;font-weight:700;color:#9fd;flex:1;`));
-                        const addBtn = document.createElement("button");addBtn.textContent="Add Images";addBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;";addBtn.onclick=async()=>{ const saved=await _sqrPickAndUploadImages(); for(const name of saved){ if(group.length>=5) break; if(!group.includes(name)) group.push(name); } renderGroups(); };
-                        const delBtn = document.createElement("button");delBtn.textContent="Remove Group";delBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;color:#f99;";delBtn.onclick=()=>{ if(groups.length<=1){ groups=[[]]; } else { groups.splice(gidx,1); } renderGroups(); };
+                        header.appendChild(mkDiv(`Group ${gidx+1} - ${group.length}/${groupLimit}`,`font-size:12px;font-weight:700;color:#9fd;flex:1;`));
+                        const addBtn = document.createElement("button");addBtn.textContent=tr("addImages");addBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;";addBtn.onclick=async()=>{ const saved=await _sqrPickAndUploadImages(); for(const name of saved){ if(!group.includes(name)) group.push(name); } normalizeGroups(true); renderGroups(); };
+                        const delBtn = document.createElement("button");delBtn.textContent=tr("removeGroup");delBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;color:#f99;";delBtn.onclick=()=>{ if(groups.length<=1){ groups=[[]]; } else { groups.splice(gidx,1); } renderGroups(); };
                         header.append(addBtn, delBtn); panel.appendChild(header);
                         const grid = document.createElement("div");Object.assign(grid.style,{display:"flex",flexWrap:"wrap",gap:"8px",minHeight:"62px"});
-                        if (!group.length) grid.appendChild(mkDiv("Drop or add images for this segment group","opacity:.35;font-size:12px;padding:8px;"));
+                        if (!group.length) grid.appendChild(mkDiv(tr("emptyGroup"),"opacity:.35;font-size:12px;padding:8px;"));
                         group.forEach((path, idx) => {
                             const fname = path.split(/[/\\]/).pop();
                             const cell = document.createElement("div");Object.assign(cell.style,{width:"112px",textAlign:"center",position:"relative",border:"2px solid var(--border-color,#555)",borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none"});cell.draggable=true;
@@ -1217,8 +1472,8 @@ app.registerExtension({
                             tools.append(mkMini("Prev",()=>moveImage(gidx,idx,-1),gidx<=0),mkMini("Next",()=>moveImage(gidx,idx,1),gidx>=groups.length-1),mkMini("Remove",()=>{group.splice(idx,1);renderGroups();}));
                             cell.ondragstart=e=>{e.stopPropagation();dragInfo={gidx,idx};setTimeout(()=>cell.style.opacity=".35",0);};cell.ondragend=e=>{e.stopPropagation();cell.style.opacity="1";dragInfo=null;};
                             cell.ondragover=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="#4a9";};cell.ondragleave=()=>{cell.style.borderColor="var(--border-color,#555)";};
-                            cell.ondrop=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="var(--border-color,#555)";if(!dragInfo)return;const [m]=groups[dragInfo.gidx].splice(dragInfo.idx,1); if(gidx!==dragInfo.gidx && group.length>=5){groups[dragInfo.gidx].splice(dragInfo.idx,0,m); alert("Target group already has 5 images.");} else {groups[gidx].splice(idx,0,m);} renderGroups();};
-                            cell.onclick=e=>{e.stopPropagation(); if(group.length>=5){alert("This group already has 5 images.");return;} group.splice(idx+1,0,path);renderGroups();};
+                            cell.ondrop=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="var(--border-color,#555)";if(!dragInfo)return;const [m]=groups[dragInfo.gidx].splice(dragInfo.idx,1); if(gidx!==dragInfo.gidx && group.length>=groupLimit){groups[dragInfo.gidx].splice(dragInfo.idx,0,m); alert(tr("refLimitExceeded"));} else {groups[gidx].splice(idx,0,m);} renderGroups();};
+                            cell.onclick=e=>{e.stopPropagation(); if(group.length>=groupLimit){alert(tr("refLimitExceeded"));return;} group.splice(idx+1,0,path);renderGroups();};
                             cell.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();group.splice(idx,1);renderGroups();};
                             cell.append(badge,img,res,lbl,tools);grid.appendChild(cell);
                         });
@@ -1228,10 +1483,10 @@ app.registerExtension({
                 renderGroups();box.appendChild(wrap);
                 const groupBtns=document.createElement("div");groupBtns.style.cssText="display:flex;gap:8px;";
                 const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
-                groupBtns.append(mkBtn("Add Group","",()=>{groups.push([]);renderGroups();}),mkBtn("Flatten To One Group","",()=>{groups=[sqrFlattenRefGroups(groups).slice(0,5)];renderGroups();}));
+                groupBtns.append(mkBtn(tr("addGroup"),"",()=>{groups.push([]);renderGroups();}),mkBtn(tr("flattenGroup"),"",()=>{groups=_sqrNormalizeRefGroupsForMode([sqrFlattenRefGroups(groups)], true);renderGroups();}));
                 box.appendChild(groupBtns);
                 const btns=document.createElement("div");btns.style.cssText="display:flex;gap:8px;";
-                btns.append(mkBtn("Cancel","",()=>overlay.remove()),mkBtn("Apply","background:#2a9;color:#fff;border:none;font-weight:600;",()=>{normalizeGroups();onConfirm(groups);overlay.remove();}));
+                btns.append(mkBtn(tr("cancel"),"",()=>overlay.remove()),mkBtn(tr("apply"),"background:#2a9;color:#fff;border:none;font-weight:600;",()=>{normalizeGroups(false, false);onConfirm(groups);overlay.remove();}));
                 box.appendChild(btns);
                 overlay.appendChild(box);overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};document.body.appendChild(overlay);
             };
@@ -1246,19 +1501,20 @@ app.registerExtension({
                         for (const name of saved) {
                             if (sqrFlattenRefGroups(cur).includes(name)) continue;
                             let group = cur[cur.length - 1];
-                            if (group.length >= 5) { group = []; cur.push(group); }
                             group.push(name);
                         }
-                        setSqr(sqrKeys[4], sqrStoreRefGroups(cur));
+                        const normalized = _sqrNormalizeRefGroupsForMode(cur, true);
+                        setSqr(sqrKeys[4], sqrStoreRefGroups(normalized));
                         refThumbWidget.syncPaths();
                     }
-                    showRefManager(result => { setSqr(sqrKeys[4], sqrStoreRefGroups(result)); refThumbWidget.syncPaths(); persistSqrState(); node.setDirtyCanvas?.(true, true); });
+                    showRefManager(result => { const normalized = _sqrNormalizeRefGroupsForMode(result, true); setSqr(sqrKeys[4], sqrStoreRefGroups(normalized)); refThumbWidget.syncPaths(); persistSqrState(); node.setDirtyCanvas?.(true, true); });
                 } catch(e) { console.warn("[SQR] Reference image selection failed:", e); }
             };
             const refBtn = node.addWidget("button", "Select Reference Images", null, () => {
                 _refNative();
             });
             refBtn.serialize = false;
+            refBtn.name = tr("selectRefs");
 
             // ── 缩略图预览行 ──
             const refThumbWidget = {
