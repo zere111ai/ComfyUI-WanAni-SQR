@@ -143,10 +143,14 @@ def _sqr_is_managed_ref_path(path: str | None, unique_id=None) -> bool:
 
 
 def _sqr_cleanup_ref_images(paths, unique_id=None, keep_paths=None):
-    keep = {os.path.realpath(str(p)) for p in (keep_paths or []) if p}
+    def _entry_path(v):
+        if isinstance(v, dict):
+            return str(v.get("path") or v.get("image") or v.get("file") or "").strip()
+        return str(v or "").strip()
+    keep = {os.path.realpath(_entry_path(p)) for p in (keep_paths or []) if _entry_path(p)}
     input_dir = os.path.realpath(folder_paths.get_input_directory())
     for raw in paths or []:
-        p = str(raw or "").strip()
+        p = _entry_path(raw)
         if not p or not _sqr_is_managed_ref_path(p, unique_id=unique_id):
             continue
         real = os.path.realpath(p)
@@ -193,6 +197,35 @@ def _sqr_prepare_checkpoint_ref_images(ref_images_list, unique_id=None):
         else:
             keep_list.append(str(raw))
     return keep_list
+
+
+def _sqr_ref_entry_path(entry):
+    if isinstance(entry, dict):
+        return str(entry.get("path") or entry.get("image") or entry.get("file") or "").strip()
+    return str(entry or "").strip()
+
+
+def _sqr_ref_entry_is_bg(entry):
+    return bool(isinstance(entry, dict) and (entry.get("bg") or entry.get("background") or entry.get("is_bg")))
+
+
+def _sqr_make_ref_entry(path, is_bg=False):
+    path = str(path or "").strip()
+    return {"path": path, "bg": True} if is_bg else path
+
+
+def _sqr_prepare_checkpoint_ref_entries(ref_entries, unique_id=None):
+    if not ref_entries:
+        return []
+    prepared = []
+    for entry in ref_entries:
+        path = _sqr_ref_entry_path(entry)
+        if not path:
+            continue
+        kept = _sqr_prepare_checkpoint_ref_images([path], unique_id=unique_id)
+        if kept:
+            prepared.append(_sqr_make_ref_entry(kept[0], _sqr_ref_entry_is_bg(entry)))
+    return prepared
 
 _SQR_COMFY_HOST_CACHE = None
 
@@ -1110,14 +1143,22 @@ class SegmentQueueRunner:
                         if any(isinstance(x, list) for x in parsed_refs):
                             for group in parsed_refs:
                                 if isinstance(group, list):
-                                    cleaned = [str(x).strip() for x in group if str(x).strip()]
+                                    cleaned = [
+                                        _sqr_make_ref_entry(_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x))
+                                        for x in group
+                                        if _sqr_ref_entry_path(x)
+                                    ]
                                 else:
-                                    cleaned = [str(group).strip()] if str(group).strip() else []
+                                    cleaned = [_sqr_make_ref_entry(_sqr_ref_entry_path(group), _sqr_ref_entry_is_bg(group))] if _sqr_ref_entry_path(group) else []
                                 if cleaned:
                                     ref_image_groups.append(cleaned)
                             ref_images_list = [x for group in ref_image_groups for x in group]
                         else:
-                            ref_images_list = [str(x).strip() for x in parsed_refs if str(x).strip()]
+                            ref_images_list = [
+                                _sqr_make_ref_entry(_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x))
+                                for x in parsed_refs
+                                if _sqr_ref_entry_path(x)
+                            ]
                 except Exception as e:
                     print(f"[SQR] Reference image JSON parse failed; using legacy format: {e}")
             if not ref_images_list:
@@ -1127,13 +1168,13 @@ class SegmentQueueRunner:
         if ref_image_groups:
             prepared_groups = []
             for group in ref_image_groups:
-                prepared = _sqr_prepare_checkpoint_ref_images(group, unique_id=unique_id)
+                prepared = _sqr_prepare_checkpoint_ref_entries(group, unique_id=unique_id)
                 if prepared:
                     prepared_groups.append(prepared)
             ref_image_groups = prepared_groups
             ref_images_list = [x for group in ref_image_groups for x in group]
         elif ref_images_list:
-            ref_images_list = _sqr_prepare_checkpoint_ref_images(ref_images_list, unique_id=unique_id)
+            ref_images_list = _sqr_prepare_checkpoint_ref_entries(ref_images_list, unique_id=unique_id)
 
         manual_video_path = manual_video_frames = None
         if resume_enabled and resume_video_path:
@@ -1270,8 +1311,8 @@ class SegmentQueueRunner:
                     elif ref_image_groups:
                         cur_group_index = min(i, len(ref_image_groups) - 1)
                         prev_group_index = min(max(0, i - 1), len(ref_image_groups) - 1)
-                        cur_group_sig = tuple(ref_image_groups[cur_group_index])
-                        prev_group_sig = tuple(ref_image_groups[prev_group_index])
+                        cur_group_sig = tuple((_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x)) for x in ref_image_groups[cur_group_index])
+                        prev_group_sig = tuple((_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x)) for x in ref_image_groups[prev_group_index])
                         if cur_group_sig != prev_group_sig:
                             startup_trim_reason = "reference group changed"
                     if startup_trim_reason:
@@ -1413,10 +1454,11 @@ class SegmentQueueRunner:
 
                 if ref_images_list and ref_target_id and ref_target_id in wf:
                     def _sqr_ref_entry_to_input_name(img_entry):
-                        if os.path.isabs(img_entry):
+                        img_path = _sqr_ref_entry_path(img_entry)
+                        if os.path.isabs(img_path):
                             import shutil as _shutil
                             input_dir = folder_paths.get_input_directory()
-                            src_real = os.path.realpath(img_entry)
+                            src_real = os.path.realpath(img_path)
                             if os.path.realpath(os.path.dirname(src_real)) == os.path.realpath(input_dir):
                                 return os.path.basename(src_real)
                             img_fname = _build_safe_input_copy_name(src_real, unique_id=unique_id, prefix="sqr_refrun")
@@ -1426,7 +1468,7 @@ class SegmentQueueRunner:
                             except Exception as e:
                                 log(f"  ! reference image copy failed: {e}")
                             return img_fname
-                        return img_entry
+                        return img_path
 
                     ref_node = wf.get(ref_target_id, {})
                     ref_class = ref_node.get("class_type", "")
@@ -1437,6 +1479,7 @@ class SegmentQueueRunner:
                             group_index = min(i, len(ref_image_groups) - 1)
                             active_refs = ref_image_groups[group_index]
                         max_refs = min(len(active_refs), 5)
+                        bg_indices = [idx + 1 for idx, entry in enumerate(active_refs[:max_refs]) if _sqr_ref_entry_is_bg(entry)]
                         for ref_slot in range(1, 7):
                             ref_inputs.pop(f"image_{ref_slot}", None)
                         for ref_slot, img_entry in enumerate(active_refs[:max_refs], start=1):
@@ -1444,8 +1487,12 @@ class SegmentQueueRunner:
                             load_id = f"sqr_mref_{seg_num}_{ref_slot}"
                             wf[load_id] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
                             ref_inputs[f"image_{ref_slot}"] = [load_id, 0]
+                        for _node in wf.values():
+                            if isinstance(_node, dict) and _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
+                                _node.setdefault("inputs", {})["background_indices"] = ",".join(str(x) for x in bg_indices)
                         group_note = f" group {min(i + 1, len(ref_image_groups))}/{len(ref_image_groups)}" if ref_image_groups else ""
-                        log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}")
+                        bg_note = f", BG={bg_indices}" if bg_indices else ""
+                        log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}{bg_note}")
                     else:
                         if multi_ref_enabled:
                             log(f"  ! Multi Ref ON expects reference node ID to point to Wan SQR Multi Reference; current={ref_class or 'Unknown'}, fallback to single image mode")

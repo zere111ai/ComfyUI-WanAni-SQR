@@ -346,6 +346,10 @@ class SQRScail2ColoredMaskAdvanced:
                     "default": "",
                     "tooltip": "multi_person/multi_person_multi_reference: group reference objects with '|', e.g. 0,1|2,3. single_person_multi_reference forces all selected reference objects to color 1.",
                 }),
+                "background_indices": ("STRING", {
+                    "default": "",
+                    "tooltip": "1-based reference image indexes treated as clean background references. Their masks are forced to full white, e.g. 2 or 1,4.",
+                }),
             },
             "optional": {
                 "ref_track_data": ("SAM3_TRACK_DATA",),
@@ -358,7 +362,7 @@ class SQRScail2ColoredMaskAdvanced:
     CATEGORY = "SQR/SCAIL2"
 
     def execute(self, driving_track_data, identity_mode, object_indices, sort_by,
-                replacement_mode, ref_identity_groups="", ref_track_data=None):
+                replacement_mode, ref_identity_groups="", background_indices="", ref_track_data=None):
         drv = _prep_track_data(driving_track_data, sort_by, object_indices)
         drv_bg = "white" if replacement_mode else "black"
         ref_bg = "black" if replacement_mode else "white"
@@ -379,6 +383,17 @@ class SQRScail2ColoredMaskAdvanced:
                 groups_text=ref_identity_groups,
                 force_single_identity=single_ref,
             )
+            bg_indices = []
+            for item in str(background_indices or "").replace("|", ",").split(","):
+                item = item.strip()
+                if item.isdigit():
+                    idx = int(item) - 1
+                    if idx >= 0:
+                        bg_indices.append(idx)
+            if bg_indices and reference_image_mask.shape[0] > 0:
+                for idx in bg_indices:
+                    if idx < reference_image_mask.shape[0]:
+                        reference_image_mask[idx:idx + 1] = 1.0
         else:
             height, width = drv["orig_size"]
             fill_value = 1.0 if ref_bg == "white" else 0.0

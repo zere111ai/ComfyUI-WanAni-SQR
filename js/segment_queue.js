@@ -10,16 +10,24 @@ function sqrThumbUrl(path) {
 function sqrParseRefGroups(value) {
     const raw = String(value || "").trim();
     if (!raw) return [];
+    const normEntry = (v) => {
+        if (v && typeof v === "object" && !Array.isArray(v)) {
+            const path = String(v.path || v.image || v.file || "").trim();
+            return path ? { path, bg: !!(v.bg || v.background || v.is_bg) } : null;
+        }
+        const path = String(v || "").trim();
+        return path || null;
+    };
     if (raw.startsWith("[")) {
         try {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) {
                 if (parsed.some(v => Array.isArray(v))) {
                     return parsed.map(group => Array.isArray(group) ? group : [group])
-                        .map(group => group.map(v => String(v).trim()).filter(Boolean))
+                        .map(group => group.map(normEntry).filter(Boolean))
                         .filter(group => group.length);
                 }
-                const flat = parsed.map(v => String(v).trim()).filter(Boolean);
+                const flat = parsed.map(normEntry).filter(Boolean);
                 return flat.length ? [flat] : [];
             }
         } catch (e) {
@@ -33,8 +41,23 @@ function sqrParseRefGroups(value) {
     return flat.length ? [flat] : [];
 }
 
+function sqrRefPath(entry) {
+    if (entry && typeof entry === "object") return String(entry.path || entry.image || entry.file || "").trim();
+    return String(entry || "").trim();
+}
+
+function sqrRefIsBg(entry) {
+    return !!(entry && typeof entry === "object" && (entry.bg || entry.background || entry.is_bg));
+}
+
+function sqrRefEntry(path, bg=false) {
+    path = String(path || "").trim();
+    if (!path) return null;
+    return bg ? { path, bg: true } : path;
+}
+
 function sqrFlattenRefGroups(groups) {
-    return (groups || []).flatMap(group => Array.isArray(group) ? group : [group]).map(v => String(v).trim()).filter(Boolean);
+    return (groups || []).flatMap(group => Array.isArray(group) ? group : [group]).map(sqrRefPath).filter(Boolean);
 }
 
 function sqrParseRefPaths(value) {
@@ -42,8 +65,13 @@ function sqrParseRefPaths(value) {
 }
 
 function sqrStoreRefGroups(groups) {
+    const cleanEntry = (v) => {
+        const path = sqrRefPath(v);
+        if (!path) return null;
+        return sqrRefIsBg(v) ? { path, bg: true } : path;
+    };
     const cleaned = (groups || [])
-        .map(group => (Array.isArray(group) ? group : [group]).map(v => String(v).trim()).filter(Boolean))
+        .map(group => (Array.isArray(group) ? group : [group]).map(cleanEntry).filter(Boolean))
         .filter(group => group.length);
     if (cleaned.length <= 1) return JSON.stringify(cleaned[0] || []);
     return JSON.stringify(cleaned);
@@ -827,7 +855,10 @@ app.registerExtension({
             }
             function _sqrNormalizeRefGroupsForMode(groups, notify=false) {
                 const flatGroups = (groups || [])
-                    .map(group => (Array.isArray(group) ? group : [group]).map(v => String(v || "").trim()).filter(Boolean));
+                    .map(group => (Array.isArray(group) ? group : [group]).map(v => {
+                        const path = sqrRefPath(v);
+                        return path ? sqrRefEntry(path, sqrRefIsBg(v)) : null;
+                    }).filter(Boolean));
                 const limit = _sqrCurrentRefGroupLimit();
                 const normalized = [];
                 let overflowed = false;
@@ -1421,7 +1452,10 @@ app.registerExtension({
                         let sourceIndex = 0;
                         const withEmpty = [];
                         for (const raw of groups) {
-                            const cleaned = (Array.isArray(raw) ? raw : [raw]).map(v => String(v || "").trim()).filter(Boolean);
+                            const cleaned = (Array.isArray(raw) ? raw : [raw]).map(v => {
+                                const path = sqrRefPath(v);
+                                return path ? sqrRefEntry(path, sqrRefIsBg(v)) : null;
+                            }).filter(Boolean);
                             if (!cleaned.length) {
                                 withEmpty.push([]);
                             } else {
@@ -1455,15 +1489,21 @@ app.registerExtension({
                         const panel = document.createElement("div");Object.assign(panel.style,{border:"1px solid var(--border-color,#555)",borderRadius:"8px",padding:"8px",background:"rgba(255,255,255,0.025)"});
                         const header = document.createElement("div");Object.assign(header.style,{display:"flex",alignItems:"center",gap:"8px",marginBottom:"8px"});
                         header.appendChild(mkDiv(`Group ${gidx+1} - ${group.length}/${groupLimit}`,`font-size:12px;font-weight:700;color:#9fd;flex:1;`));
-                        const addBtn = document.createElement("button");addBtn.textContent=tr("addImages");addBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;";addBtn.onclick=async()=>{ const saved=await _sqrPickAndUploadImages(); for(const name of saved){ if(!group.includes(name)) group.push(name); } normalizeGroups(true); renderGroups(); };
+                        const addBtn = document.createElement("button");addBtn.textContent=tr("addImages");addBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;";addBtn.onclick=async()=>{ const saved=await _sqrPickAndUploadImages(); const existing = new Set(sqrFlattenRefGroups(groups)); for(const name of saved){ if(!existing.has(name)) { group.push(name); existing.add(name); } } normalizeGroups(true); renderGroups(); };
                         const delBtn = document.createElement("button");delBtn.textContent=tr("removeGroup");delBtn.style.cssText="padding:4px 8px;border-radius:5px;cursor:pointer;font-size:11px;color:#f99;";delBtn.onclick=()=>{ if(groups.length<=1){ groups=[[]]; } else { groups.splice(gidx,1); } renderGroups(); };
                         header.append(addBtn, delBtn); panel.appendChild(header);
                         const grid = document.createElement("div");Object.assign(grid.style,{display:"flex",flexWrap:"wrap",gap:"8px",minHeight:"62px"});
                         if (!group.length) grid.appendChild(mkDiv(tr("emptyGroup"),"opacity:.35;font-size:12px;padding:8px;"));
-                        group.forEach((path, idx) => {
+                        group.forEach((entry, idx) => {
+                            const path = sqrRefPath(entry);
+                            const isBg = sqrRefIsBg(entry);
                             const fname = path.split(/[/\\]/).pop();
-                            const cell = document.createElement("div");Object.assign(cell.style,{width:"112px",textAlign:"center",position:"relative",border:"2px solid var(--border-color,#555)",borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none"});cell.draggable=true;
+                            const cell = document.createElement("div");Object.assign(cell.style,{width:"112px",textAlign:"center",position:"relative",border:`2px solid ${isBg ? "#d8d8d8" : "var(--border-color,#555)"}`,borderRadius:"7px",padding:"4px",cursor:"grab",userSelect:"none",background:isBg?"rgba(255,255,255,0.06)":""});cell.draggable=true;
                             const badge = mkDiv(`${gidx+1}.${idx+1}`,"position:absolute;top:2px;left:2px;background:#3a9;color:#fff;border-radius:3px;padding:0 4px;font-size:10px;font-weight:bold;line-height:16px;z-index:1;");
+                            const bgRow = document.createElement("label");bgRow.style.cssText="display:flex;align-items:center;justify-content:center;gap:4px;margin-top:4px;font-size:10px;cursor:pointer;";
+                            const bgRadio = document.createElement("input");bgRadio.type="radio";bgRadio.name=`sqr-bg-${gidx}-${idx}`;bgRadio.checked=isBg;bgRadio.style.cssText="margin:0;";
+                            bgRadio.onclick=e=>{e.stopPropagation();group[idx]=sqrRefEntry(path,!isBg);renderGroups();};
+                            bgRow.append(bgRadio, document.createTextNode("BG"));
                             const img = new Image();img.src=sqrThumbUrl(path);Object.assign(img.style,{width:"104px",height:"92px",objectFit:"contain",display:"block",borderRadius:"4px",pointerEvents:"none"});
                             const res = mkDiv("loading","font-size:9px;margin-top:2px;color:#8fd;opacity:.72;");img.onload=()=>{res.textContent=`${img.naturalWidth}x${img.naturalHeight}`;};img.onerror=()=>{res.textContent="unknown";};
                             const lbl = mkDiv(fname.length>16?fname.slice(0,15)+"...":fname,"font-size:9px;margin-top:3px;word-break:break-all;opacity:.7;");lbl.title=path;
@@ -1475,7 +1515,7 @@ app.registerExtension({
                             cell.ondrop=e=>{e.preventDefault();e.stopPropagation();cell.style.borderColor="var(--border-color,#555)";if(!dragInfo)return;const [m]=groups[dragInfo.gidx].splice(dragInfo.idx,1); if(gidx!==dragInfo.gidx && group.length>=groupLimit){groups[dragInfo.gidx].splice(dragInfo.idx,0,m); alert(tr("refLimitExceeded"));} else {groups[gidx].splice(idx,0,m);} renderGroups();};
                             cell.onclick=e=>{e.stopPropagation(); if(group.length>=groupLimit){alert(tr("refLimitExceeded"));return;} group.splice(idx+1,0,path);renderGroups();};
                             cell.oncontextmenu=e=>{e.preventDefault();e.stopPropagation();group.splice(idx,1);renderGroups();};
-                            cell.append(badge,img,res,lbl,tools);grid.appendChild(cell);
+                            cell.append(badge,img,res,lbl,bgRow,tools);grid.appendChild(cell);
                         });
                         panel.appendChild(grid);wrap.appendChild(panel);
                     });
@@ -1524,7 +1564,11 @@ app.registerExtension({
                     this._groups = sqrParseRefGroups(getSqr(sqrKeys[4]));
                     this._paths = sqrFlattenRefGroups(this._groups);
                     this._pathLabels = [];
-                    this._groups.forEach((group, gi) => group.forEach((_, ii) => this._pathLabels.push(this._groups.length > 1 ? `${gi + 1}.${ii + 1}` : String(ii + 1))));
+                    this._bgFlags = [];
+                    this._groups.forEach((group, gi) => group.forEach((entry, ii) => {
+                        this._pathLabels.push(this._groups.length > 1 ? `${gi + 1}.${ii + 1}` : String(ii + 1));
+                        this._bgFlags.push(sqrRefIsBg(entry));
+                    }));
                     const nextLoaded = {};
                     this._paths.forEach(p => { const img = new Image(); img.src = sqrThumbUrl(p); img.onload = () => node.setDirtyCanvas?.(true, true); nextLoaded[p] = img; });
                     this._loaded = nextLoaded;
@@ -1546,6 +1590,7 @@ app.registerExtension({
                         const imageH = Math.max(20, h - labelH);
                         if (img?.complete && img.naturalWidth) { const iw = img.naturalWidth, ih = img.naturalHeight; const scale = Math.min(w/iw, imageH/ih); const dw = iw*scale, dh = ih*scale; ctx.save(); if (this._dragSrc === i) ctx.globalAlpha = 0.35; ctx.drawImage(img, x+(w-dw)/2, ty+(imageH-dh)/2, dw, dh); ctx.restore(); } else { ctx.fillStyle = "#2a2a2a"; ctx.fillRect(x, ty, w, imageH); ctx.fillStyle = "#666"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("…", x+w/2, ty+imageH/2+4); }
                         ctx.fillStyle = "rgba(50,150,70,0.92)"; ctx.fillRect(x, ty, 15, 15); ctx.fillStyle = "#fff"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center"; ctx.fillText(this._pathLabels?.[i] || String(i+1), x+7.5, ty+11);
+                        if (this._bgFlags?.[i]) { ctx.fillStyle = "rgba(245,245,245,0.95)"; ctx.fillRect(x + w - 24, ty, 24, 15); ctx.fillStyle = "#111"; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center"; ctx.fillText("BG", x + w - 12, ty + 11); }
                         const res = img?.complete && img.naturalWidth ? `${img.naturalWidth}x${img.naturalHeight}` : "";
                         if (res) {
                             ctx.fillStyle = "rgba(0,0,0,0.45)";

@@ -19,6 +19,7 @@ Changes include:
 - Added top-bar toggles for Multi Ref, Startup Fix, Replacement, and Transition, plus a `中/EN` language switch for the WanAni SQR interface.
 - Synced Multi Ref and Replacement toggles to SCAIL-2 colored mask identity/replacement behavior.
 - Added single-person multi-reference and multi-person multi-reference colored mask modes, with preview support for every reference mask instead of only the first mask.
+- Added clean background reference support for SCAIL-2 Multi Reference groups. Each reference image can be marked as `BG`; BG references are passed to the colored-mask node as background indexes and receive full-white reference masks, matching SCAIL-2's official background-reference semantics.
 - Added a Startup Fix path for SCAIL-2 Multi Reference: the first segment can prepend 9 repeated first frames, extend generation length, then hide those startup frames from the visible output to reduce reference-image flashes.
 - Aligned the internal transition source after Startup Fix so later segments use the visible timeline instead of the hidden startup buffer.
 - Preserved 17/16-frame SCAIL-2 transition behavior while avoiding duplicated motion on transition segments.
@@ -29,6 +30,7 @@ Changes include:
 
 Testing notes:
 - The new Startup Fix path is intended for SCAIL-2 Multi Reference runs where reference images may briefly flash at the beginning.
+- Mark only clean background references as `BG`; character reference images should keep the normal semantic color mask so SCAIL-2 does not treat unrelated backgrounds as target content.
 - For normal transition segments, Startup Fix is skipped so the 17/16 transition path remains responsible for motion continuity.
 - If a workflow appears to lose the new UI controls after updating, restart ComfyUI and clear browser cache; duplicate backup copies of this extension inside `custom_nodes` can load older frontend scripts.
 
