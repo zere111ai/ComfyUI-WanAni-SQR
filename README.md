@@ -4,6 +4,30 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUN-30
+
+## Summary--
+Add resumable folder-based image processing, automatic per-image queue continuation, progress reporting, footer branding, and source-aware output folders for Flux.2 Klein batch restyling workflows.
+
+## Description--
+This update adds a production-oriented image batch pipeline alongside the existing WanAnimate and SCAIL queue tools.
+
+New nodes:
+- `LH Images Folder Loader`: Loads images without normalizing their original dimensions. Its resumable sequential mode records the folder image count, current index, manifest, active file, and independent run ID. Interrupted jobs resume from the last successfully saved image.
+- `LH Save Image (Passthrough)`: Saves each completed image before automatically queuing the next one. It prevents stale duplicate jobs, preserves browser preview updates, expands date tokens, records checkpoints, and creates a source-aware output directory named `<source-folder>-f2kmd`.
+- `LH Image Footer Bar`: Optionally adds a solid white bar with black text or a solid black bar with white text. The text, bar height, font size, and padding are configurable, with automatic fitting for long account names and URLs.
+
+Included workflow:
+- `example_workflows/f2k-reskin.json`: A basic Flux.2 Klein 9B folder-restyling workflow with automatic aspect-preserving ~1.5 MP sizing, resumable one-image-at-a-time processing, progress display, optional footer branding, and organized output folders.
+
+Reliability improvements:
+- Each automatic queue step receives an explicit image index so ComfyUI cannot reuse the previous image cache.
+- Each reset creates a new run ID, allowing the same folder to be processed repeatedly without colliding with duplicate protection from an older run.
+- Checkpoints advance only after a successful save. Stale prompts cannot move progress backward or save duplicate output.
+- Folder sorting, start index, and load cap are included in the checkpoint identity.
+- The loader displays current/total progress, percentage, and active filename directly on the node.
+- Runtime checkpoint files are excluded from Git.
+
 ## Update 2026-JUN-26
 
 ## Summary--
