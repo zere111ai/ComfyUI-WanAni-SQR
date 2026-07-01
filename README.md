@@ -4,6 +4,23 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-01
+
+## Summary--
+Fix Load Video start-frame offsets, remember the most recently used segment count across workflows, and support source videos without audio streams.
+
+## Description--
+This update improves segmented queue timeline accuracy and everyday workflow usability.
+
+Changes include:
+- Preserved the original `VHS_LoadVideo.skip_first_frames` value when the queue creates per-segment jobs. Segment offsets are now added to the configured source offset instead of replacing it, preventing skipped opening frames from incorrectly becoming missing frames at the end.
+- Applied the same corrected source offset to audio slicing so picture and sound remain aligned.
+- Saved the most recently selected segment count in browser-local settings and restored it after switching workflows, instead of resetting the segment control to the default value of `2`.
+- Added audio-stream detection before creating `VHS_LoadAudioUpload` nodes. Videos without an audio stream now continue through the queue as silent video instead of failing during audio extraction.
+- Removed stale audio inputs from full and trimmed segment outputs when the source is silent.
+
+Restart ComfyUI and refresh the frontend after updating so both backend and UI changes take effect.
+
 ## Update 2026-JUN-30
 
 ## Summary--

@@ -547,6 +547,32 @@ def find_multi_reference_node(prompt: dict) -> str | None:
     return None
 
 
+def media_has_audio(path: str | None) -> bool:
+    """Return True only when the media file contains at least one audio stream."""
+    if not path or not os.path.isfile(path):
+        return False
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if os.name == "nt" else "ffprobe")
+    if not os.path.isfile(ffprobe):
+        ffprobe = shutil.which("ffprobe")
+    try:
+        if ffprobe:
+            result = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=20,
+            )
+            return result.returncode == 0 and bool(result.stdout.strip())
+        result = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True, timeout=20)
+        return "Audio:" in (result.stderr or "")
+    except Exception:
+        return False
+
+
 def _sqr_rewire_image_output(prompt: dict, old_ref, new_ref):
     changed = 0
     for nid, node in prompt.items():
@@ -1218,7 +1244,12 @@ class SegmentQueueRunner:
 
         audio_filename = find_audio_filename(base_prompt, node_id)
         if audio_filename:
-            _sqr_log(unique_id, f"[SQR] 音频文件: {audio_filename}")
+            _audio_source_path = _sqr_resolve_media_path(audio_filename)
+            if media_has_audio(_audio_source_path):
+                _sqr_log(unique_id, f"[SQR] 音频文件: {audio_filename}")
+            else:
+                _sqr_log(unique_id, f"[SQR] ℹ 输入视频不含音频流，将按无音频模式处理: {audio_filename}")
+                audio_filename = None
         else:
             _sqr_log(unique_id, f"[SQR] ⚠ 无法获取音频文件名")
 
@@ -1378,8 +1409,8 @@ class SegmentQueueRunner:
                     wf[vc_nid]["inputs"]["audio"] = [audio_tmp_id, 0]
                     log(f"  ✓ 主节点音频: start={audio_start_time:.3f}s ({transition_note})")
                 elif vc_nid and vc_nid in wf:
-                    wf[vc_nid]["inputs"]["audio"] = [node_id, 2]
-                    log(f"  ⚠ 音频: 无法获取文件名，直接用LoadVideo音频(skip={skip}帧)")
+                    wf[vc_nid]["inputs"].pop("audio", None)
+                    log("  ℹ 当前输入没有可用音频，输出纯视频")
 
                 transition_image_node = None
                 if ae_nid and ae_nid in wf:
@@ -1660,6 +1691,9 @@ class SegmentQueueRunner:
                         }
                         cut_inputs["audio"] = [cut_audio_id, 0]
                         log(f"  ✓ cut_vc音频: start={audio_skip_frames/frame_rate:.3f}s (={audio_skip_frames}帧)")
+                    else:
+                        full_inputs.pop("audio", None)
+                        cut_inputs.pop("audio", None)
 
                     wf[full_vc_id] = {"class_type": "VHS_VideoCombine", "inputs": full_inputs}
                     wf[cut_vc_id] = {"class_type": "VHS_VideoCombine", "inputs": cut_inputs}

@@ -477,6 +477,22 @@ app.registerExtension({
 
             const segW = getW("分段数");
             const startW = getW("从第几段开始");
+            const _SQR_LAST_SEGMENTS_KEY = "sqr_last_segments";
+            const _sqrLoadLastSegments = () => {
+                try {
+                    const value = Math.round(Number(localStorage.getItem(_SQR_LAST_SEGMENTS_KEY)));
+                    return Number.isFinite(value) && value >= 1 ? Math.min(100, value) : null;
+                } catch (e) {
+                    return null;
+                }
+            };
+            const _sqrSaveLastSegments = value => {
+                const normalized = Math.max(1, Math.min(100, Math.round(Number(value) || 1)));
+                try { localStorage.setItem(_SQR_LAST_SEGMENTS_KEY, String(normalized)); } catch (e) {}
+                return normalized;
+            };
+            const _lastSegments = _sqrLoadLastSegments();
+            if (segW && _lastSegments !== null) segW.value = _lastSegments;
             let segUiW = null;
             let startUiW = null;
             let multiRefW = getW("multi_ref_enabled");
@@ -570,6 +586,7 @@ app.registerExtension({
                 segW.callback = function(v, ...args) {
                     const iv = Math.max(1, Math.round(v));
                     this.value = iv;
+                    _sqrSaveLastSegments(iv);
                     if (startW) {
                         startW.options.max = iv;
                         if (startW.value > iv) startW.value = iv;
@@ -711,6 +728,8 @@ app.registerExtension({
                 const saved = data?.properties?.sqr_node_ids || this.properties?.sqr_node_ids;
                 const savedState = data?.properties?.sqr_state || this.properties?.sqr_state;
                 restoreSqrState(savedState);
+                const lastSegments = _sqrLoadLastSegments();
+                if (segW && lastSegments !== null) segW.value = lastSegments;
                 setTimeout(() => {
                     const repaired = {};
                     for (const key of SQR_NODE_ID_KEYS) {
@@ -906,6 +925,7 @@ app.registerExtension({
                     const iv = Math.max(1, Math.min(maxVal, Math.round(Number(v) || 1)));
                     segUiW.value = iv;
                     segW.value = iv;
+                    _sqrSaveLastSegments(iv);
                     segW.callback?.(iv);
                     if (startUiW && startW) {
                         startUiW.options.max = iv;
