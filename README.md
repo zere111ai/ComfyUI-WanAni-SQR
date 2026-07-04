@@ -4,6 +4,27 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-05 — WAN ANI DIRECTOR
+
+## Summary--
+Add a full visual directing console for manually segmenting reference videos, assigning per-segment references and prompts, controlling replacement or animation behavior, and preparing reference-image proportions before queued WanAnimate or SCAIL-2 generation.
+
+## Description--
+`WAN ANI DIRECTOR` is a timeline-oriented controller built specifically for the WanAni SQR execution model. It keeps the existing segmented queue, checkpoint, audio, transition, and merge pipeline while replacing equal-only segmentation with a visual editing workflow.
+
+Main features:
+- Responsive reference-video preview with synchronized playback, scrubbing, exact source metadata, and live updates for `force_rate`, `skip_first_frames`, `frame_load_cap`, and `select_every_nth`.
+- Manual Cut workflow and draggable segment boundaries, with a strict 60-frame minimum, unique segment colors, deletion gap repair, and 1–100 equal-segment generation.
+- Per-segment ordered reference groups with drag sorting, adaptive thumbnails, original-resolution labels, person/background tagging, and forward inheritance when later segments leave references empty.
+- Single-reference mode sends only the first image and forces it to be a normal person reference. Multi Ref mode injects the complete ordered group and synchronizes SCAIL-2 Colored Mask identity settings.
+- Global motion/expression versus character-replacement control, with replacement state propagated to every segment, Colored Mask Advanced, and the SCAIL-2 transition node.
+- Per-segment Positive prompts exposed through a new `STRING` output. Empty later prompts inherit the most recent prompt; the first segment is required.
+- Two transition behaviors: ON retains visual/latent smoothing; OFF runs every segment independently from its own references and contiguous source-motion frames, then hard-concatenates the exact visible ranges.
+- Guide-frame extraction at the playhead plus a visual reference-scale editor. References can be overlaid, dragged, scaled, and saved at their original resolution with gray padding or crop-on-zoom.
+- Live per-segment Video Combine previews, browser client binding, bilingual Chinese/English UI, responsive node sizing, resumable checkpoints, audio alignment, and final video merging.
+
+Restart ComfyUI and refresh the frontend after updating because this release changes both Python node schemas/routes and JavaScript UI extensions.
+
 ## Update 2026-JUL-01
 
 ## Summary--

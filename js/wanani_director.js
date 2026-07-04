@@ -1,344 +1,127 @@
 const { app } = window.comfyAPI.app;
 
-const WAD_KEYS = {
-  totalFrames: "总帧数",
-  frameRate: "帧率",
-  transition: "启用过渡效果",
-  segments: "分段数",
-  start: "从第几段开始",
-  execute: "执行",
-  resume: "启用续跑",
-  refVideoId: "参考视频节点ID",
-  outputId: "输出节点ID",
-  animateId: "动作嵌入节点ID",
-  refId: "参考图节点ID",
-  refs: "分段参考图",
-  resumePath: "续跑视频路径",
-  multiRef: "multi_ref_enabled",
-  replacement: "replacement_enabled",
-  data: "director_data",
+const K = {
+  frames: "总帧数", fps: "帧率", count: "分段数", start: "从第几段开始",
+  transition: "启用过渡效果", execute: "执行", resume: "启用续跑",
+  videoId: "参考视频节点ID", outputId: "输出节点ID", motionId: "动作嵌入节点ID",
+  refId: "参考图节点ID", refs: "分段参考图", resumePath: "续跑视频路径",
+  multi: "multi_ref_enabled", replace: "replacement_enabled", data: "director_data",
+};
+const $w = (n, name) => n.widgets?.find(w => w.name === name);
+const val = (n, name, fallback = "") => $w(n, name)?.value ?? fallback;
+function setVal(n, name, value) { const w = $w(n, name); if (!w || w.value === value) return false; w.value = value; w.callback?.(value); return true; }
+function hide(w) { if (!w) return; w.hidden = true; w.computeSize = () => [0, -4]; w.draw = () => {}; w.element && (w.element.style.display = "none"); }
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const segmentColor = index => `hsl(${Math.round((index * 137.508 + 142) % 360)} 48% 42%)`;
+const TEXT = {
+  zh:{transfer:"动作/表情迁移",replacement:"人物替换",transition:"连续过渡",execute:"执行",settings:"节点设置",cut:"Cut / 切片",extract:"提取帧",delete:"删除段",dragTip:"拖动彩色边界可精确调整，每段至少 60 帧",positive:"Positive 提示词",promptRequired:"第一段必须填写提示词",inherited:"留空则沿用上一段提示词",reference:"＋ 参考图",adjust:"调整比例",uploadTip:"上传到当前分段（最多 5 张）",segmentRefs:"本段参考图",refTip:"拖拽调整顺序；点击切换人物/背景，× 删除",singleWarning:"非多参模式，每段只会传入第一张参考图，并强制作为人物参考",noRefs:"本段没有参考图",inheritRefs:"本段将自动沿用上一段参考图",guide:"比例引导帧（不传入模型）",save:"保存调整",close:"关闭",scale:"缩放",opacity:"透明度",person:"人物",background:"背景",videoId:"参考视频节点 ID",refId:"参考图节点 ID",motionId:"动作嵌入节点 ID",outputId:"输出节点 ID",idTitle:"工作流节点设置",videoNote:"参考视频 ID 同时用于预览和队列切片",segment:"段",frames:"帧",equal:"平均分段",apply:"应用",lang:"EN"},
+  en:{transfer:"Motion / Expression",replacement:"Character Replace",transition:"Continuous Transition",execute:"Execute",settings:"Node Settings",cut:"Cut",extract:"Extract Frame",delete:"Delete Segment",dragTip:"Drag colored boundaries for exact timing; minimum 60 frames per segment",positive:"Positive Prompt",promptRequired:"The first segment requires a prompt",inherited:"Leave empty to inherit the previous prompt",reference:"＋ Reference Images",adjust:"Adjust Scale",uploadTip:"Upload to selected segment (max 5)",segmentRefs:"Segment References",refTip:"Drag to reorder; click to toggle person/background; × removes",singleWarning:"Non-Multi Ref mode sends only the first image and forces it to be a person reference",noRefs:"No reference images in this segment",inheritRefs:"This segment will inherit the previous references",guide:"Scale guide frame (not sent to model)",save:"Save Adjustment",close:"Close",scale:"Scale",opacity:"Opacity",person:"Person",background:"Background",videoId:"Reference Video Node ID",refId:"Reference Node ID",motionId:"Animate Embeds Node ID",outputId:"Output Node ID",idTitle:"Workflow Node Settings",videoNote:"Reference video ID drives both preview and queue slicing",segment:"Segment",frames:"frames",equal:"Equal Segments",apply:"Apply",lang:"中"}
 };
 
-function wadHideWidget(w) {
-  if (!w) return;
-  w.hidden = true;
-  w.computeSize = () => [0, 0];
-  w.draw = () => {};
-  w.mouse = () => false;
-  w.options = Object.assign({}, w.options || {}, { hidden: true });
-  if (w.element) w.element.style.display = "none";
+function styles() {
+  if (document.getElementById("wad2-css")) return;
+  const el = document.createElement("style"); el.id = "wad2-css";
+  el.textContent = `
+  .wad2{font:12px system-ui;color:#ddd;display:flex;flex-direction:column;gap:8px;padding:2px;box-sizing:border-box}.wad2 *{box-sizing:border-box}
+  .wad2-head,.wad2-row{display:flex;align-items:center;gap:6px}.wad2-head{justify-content:space-between}.wad2-title{font-weight:800;letter-spacing:.08em;color:#fff}.wad2-time{font-family:monospace;color:#8de2bd}
+  .wad2 button,.wad2 input{border:1px solid #3b3b3b;background:#242424;color:#ddd;border-radius:5px;padding:5px 7px;font-size:11px}.wad2 button{cursor:pointer}.wad2 button:hover{border-color:#777}.wad2 button.on{background:#23543f;border-color:#54bd87}.wad2 button.danger{color:#ffb2a8}
+  .wad2-video{width:100%;height:180px;background:#101010;border-radius:7px;object-fit:contain}.wad2-canvas{width:100%;height:96px;background:#171717;border:1px solid #333;border-radius:6px;touch-action:none}
+  .wad2-editor{min-height:145px}.wad2-panel{background:#191919;border:1px solid #303030;border-radius:7px;padding:8px;min-width:0}.wad2-segs{display:flex;gap:5px;overflow-x:auto;padding-bottom:5px}
+  .wad2-chip{min-width:86px!important;text-align:left}.wad2-chip.on{background:#244d40}.wad2-equal{display:flex;align-items:center;gap:4px;min-width:max-content;padding-right:4px;border-right:1px solid #3a3a3a}.wad2-equal span{font-size:10px;color:#aaa}.wad2-equal input{width:52px}.wad2-mode{display:flex;gap:5px;margin:7px 0}.wad2-refs{display:flex;gap:10px;min-height:calc(var(--wad-ref-size, 116px) + 32px);overflow-x:auto;padding:3px}.wad2-ref-wrap{width:var(--wad-ref-size,116px);min-width:var(--wad-ref-size,116px)}.wad2-ref{position:relative;width:var(--wad-ref-size,116px);height:var(--wad-ref-size,116px);border:2px solid #3b3b3b;border-radius:7px;overflow:hidden;cursor:grab;background:#0d0d0d;transition:width .12s ease,height .12s ease}.wad2-ref:active{cursor:grabbing}.wad2-ref.dragging{opacity:.38}.wad2-ref.drag-over{outline:2px solid #78dba8;outline-offset:2px}.wad2-ref.bg{border-color:#d6a642}.wad2-ref img{width:100%;height:100%;object-fit:contain;object-position:center}.wad2-ref span{position:absolute;left:3px;bottom:3px;background:#000b;padding:2px 4px;font-size:10px}.wad2-ref i{position:absolute;right:3px;top:2px;background:#000c;padding:2px 5px;font-style:normal;cursor:pointer}.wad2-ref-size{text-align:center;color:#aaa;font:10px ui-monospace,monospace;padding-top:4px}.wad2-warning{color:#e9bd68;font-size:10px;margin-top:4px}
+  .wad2-muted{color:#888;font-size:10px}.wad2-settings{display:grid;grid-template-columns:1fr 1fr;gap:5px}.wad2-settings label{font-size:9px;color:#999}.wad2-settings input{width:100%;margin-top:2px}.wad2-ref-upload{position:relative;display:inline-block;overflow:hidden}.wad2-ref-upload input{position:absolute;inset:0;opacity:0;cursor:pointer}
+  .wad2-prompt-wrap{background:#191919;border:1px solid #303030;border-radius:7px;padding:7px}.wad2-prompt-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px}.wad2-prompt{width:100%;min-height:72px;resize:vertical;background:#111;border:1px solid #3b3b3b;border-radius:5px;color:#e8e8e8;padding:7px;font:11px/1.45 ui-monospace,Consolas,monospace}
+  .wad2-guide{border-color:#ff4242!important;box-shadow:0 0 10px #ff303077}.wad2-guide-label{color:#ff8e8e!important}.wad2-adjust-modal{position:fixed;inset:0;z-index:100000;background:#000c;display:flex;align-items:center;justify-content:center}.wad2-adjust-box{width:min(900px,92vw);max-height:92vh;background:#171717;border:1px solid #555;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:9px}.wad2-adjust-tabs{display:flex;gap:6px;overflow-x:auto}.wad2-adjust-tabs button.on{border:2px solid #55d98b;background:#1f4d37;color:#effff5;box-shadow:0 0 9px #45d17c66}.wad2-adjust-stage{position:relative;width:100%;height:min(62vh,620px);background:#333;overflow:hidden;border-radius:7px;touch-action:none}.wad2-adjust-stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}.wad2-adjust-overlay{transform-origin:center center}.wad2-adjust-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.wad2-adjust-controls input[type=range]{width:170px}
+  `; document.head.appendChild(el);
 }
 
-function wadGetWidget(node, name) {
-  return node.widgets?.find(w => w.name === name);
-}
-
-function wadSetWidget(node, name, value) {
-  const w = wadGetWidget(node, name);
-  if (!w) return;
-  w.value = value;
-  w.callback?.(value);
-  node.setDirtyCanvas?.(true, true);
-}
-
-function wadReadBool(node, name) {
-  return !!wadGetWidget(node, name)?.value;
-}
-
-function wadReadInt(node, name, fallback = 0) {
-  const v = Number.parseInt(wadGetWidget(node, name)?.value ?? "", 10);
-  return Number.isFinite(v) ? v : fallback;
-}
-
-function wadReadString(node, name) {
-  return String(wadGetWidget(node, name)?.value ?? "");
-}
-
-function wadInjectStyles() {
-  if (document.getElementById("wan-ani-director-styles")) return;
-  const style = document.createElement("style");
-  style.id = "wan-ani-director-styles";
-  style.textContent = `
-    .wad-root { width:100%; box-sizing:border-box; display:flex; flex-direction:column; gap:8px; color:#e8e8e8; font-family:ui-sans-serif,system-ui,Segoe UI,Arial; }
-    .wad-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-    .wad-title { font-size:13px; font-weight:700; letter-spacing:.02em; }
-    .wad-time { font:12px ui-monospace,SFMono-Regular,Consolas,monospace; color:#9fd; }
-    .wad-row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
-    .wad-btn { border:1px solid #333; background:#242424; color:#ddd; border-radius:5px; padding:5px 8px; font-size:11px; cursor:pointer; }
-    .wad-btn:hover { background:#303030; border-color:#555; }
-    .wad-btn.on { background:#1d5138; border-color:#43b978; color:#f2fff7; }
-    .wad-btn.warn.on { background:#5a3820; border-color:#d78d45; }
-    .wad-num, .wad-text { background:#1d1d1d; border:1px solid #333; color:#e8e8e8; border-radius:5px; padding:4px 6px; font-size:11px; box-sizing:border-box; }
-    .wad-num { width:64px; }
-    .wad-text { width:100%; min-width:0; }
-    .wad-label { font-size:10px; color:#999; margin-right:2px; }
-    .wad-panel { border:1px solid #262626; background:#191919; border-radius:7px; padding:8px; display:flex; flex-direction:column; gap:7px; }
-    .wad-canvas { width:100%; height:156px; border-radius:6px; background:#242424; border:1px solid #101010; display:block; }
-    .wad-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }
-    .wad-small { font-size:10px; color:#aaa; line-height:1.35; }
-    .wad-area { height:56px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
-  `;
-  document.head.appendChild(style);
-}
-
-class WanAniDirectorUI {
-  constructor(node, container, widget) {
-    this.node = node;
-    this.widget = widget;
-    this.container = container;
-    this.canvas = null;
-    this.ctx = null;
-    this.build();
-    this.syncFromWidgets();
-    this.render();
+class Director {
+  constructor(node, host, widget) {
+    this.node = node; this.host = host; this.selected = 0; this.playhead = 0; this.scrubbing = false;
+    this.widget=widget;this.lang=(node.properties?.sqr_ui_lang||localStorage.getItem("sqr_ui_lang"))==="zh"?"zh":"en";this.imageInfoCache=new Map();
+    this.state = this.readState();const globalReplacement=Boolean(val(this.node,K.replace,false));this.state.segments.forEach((s,i)=>{s.color ||= segmentColor(i);s.mode=globalReplacement?"replacement":"transfer"}); this.state.nextColorIndex ??= this.state.segments.length; this.build(); this.refreshSource(); this.persist();
+    this.timer = setInterval(() => this.syncExternal(), 2000);
+    this.resizeObserver=new ResizeObserver(()=>this.resizePreview());this.resizeObserver.observe(this.host);this.resizePreview();
   }
-
+  t(key){return TEXT[this.lang]?.[key]||TEXT.en[key]||key}
+  refPath(ref){return typeof ref==='string'?ref:String(ref?.path||'')}
+  get total() { return Math.max(1, Number(this.mediaTotal || val(this.node, K.frames, 1)) || 1); }
+  get fps() { return Math.max(.01, Number(this.mediaFps || val(this.node, K.fps, 16)) || 16); }
+  readState() {
+    try { const d = JSON.parse(String(val(this.node, K.data, "{}"))); if (d?.version >= 3 && Array.isArray(d.segments)) return d; } catch {}
+    const total = Math.max(1, Number(val(this.node, K.frames, 81)) || 81);
+    let legacy = []; try { const p = JSON.parse(String(val(this.node, K.refs, "[]"))); legacy = Array.isArray(p) ? p : []; } catch {}
+    const refs=(Array.isArray(legacy[0])?legacy[0]:legacy[0]?[legacy[0]]:[]).map(x=>typeof x==="string"?{path:x,background:false}:x);
+    return {version:3, segments:[{id:"seg_1",start:0,end:total,enabled:true,mode:"transfer",multi_ref:refs.length>1,references:refs}]};
+  }
   build() {
-    wadInjectStyles();
-    const root = document.createElement("div");
-    root.className = "wad-root";
-    this.root = root;
-
-    const head = document.createElement("div");
-    head.className = "wad-head";
-    head.innerHTML = `<div class="wad-title">WAN ANI DIRECTOR</div><div class="wad-time">00:00 / 0 frames</div>`;
-    this.timeEl = head.lastElementChild;
-    root.appendChild(head);
-
-    const toggles = document.createElement("div");
-    toggles.className = "wad-row";
-    this.multiBtn = this.makeToggle("Multi Ref", WAD_KEYS.multiRef);
-    this.replaceBtn = this.makeToggle("Replacement", WAD_KEYS.replacement, "warn");
-    this.transBtn = this.makeToggle("Transition", WAD_KEYS.transition);
-    this.execBtn = this.makeToggle("Execute", WAD_KEYS.execute, "warn");
-    toggles.append(this.multiBtn, this.replaceBtn, this.transBtn, this.execBtn);
-    root.appendChild(toggles);
-
-    const panel = document.createElement("div");
-    panel.className = "wad-panel";
-    const row = document.createElement("div");
-    row.className = "wad-row";
-    row.append(this.label("Segments"), this.numberInput(WAD_KEYS.segments, 1, 100), this.label("Start"), this.numberInput(WAD_KEYS.start, 1, 100));
-    panel.appendChild(row);
-
-    this.canvas = document.createElement("canvas");
-    this.canvas.className = "wad-canvas";
-    this.ctx = this.canvas.getContext("2d");
-    panel.appendChild(this.canvas);
-
-    const ids = document.createElement("div");
-    ids.className = "wad-grid";
-    ids.append(
-      this.textInput("Ref ID", WAD_KEYS.refId),
-      this.textInput("Video ID", WAD_KEYS.refVideoId),
-      this.textInput("Output ID", WAD_KEYS.outputId),
-      this.textInput("Motion ID", WAD_KEYS.animateId),
-    );
-    panel.appendChild(ids);
-
-    const refLabel = document.createElement("div");
-    refLabel.className = "wad-small";
-    refLabel.textContent = "Reference groups JSON / selected image list";
-    panel.appendChild(refLabel);
-    this.refsArea = document.createElement("textarea");
-    this.refsArea.className = "wad-text wad-area";
-    this.refsArea.value = wadReadString(this.node, WAD_KEYS.refs);
-    this.refsArea.addEventListener("input", () => {
-      wadSetWidget(this.node, WAD_KEYS.refs, this.refsArea.value);
-      this.persist();
-    });
-    panel.appendChild(this.refsArea);
-
-    root.appendChild(panel);
-    this.container.appendChild(root);
-    this.resizeObserver = new ResizeObserver(() => this.render());
-    this.resizeObserver.observe(this.container);
+    styles(); this.host.innerHTML = ""; const root = document.createElement("div"); root.className="wad2"; this.root=root;
+    root.innerHTML = `<div class="wad2-head"><div class="wad2-title">WANANI DIRECTOR <span class="wad2-muted">DEMO</span></div><div class="wad2-time"></div></div>`;
+    const tools=document.createElement("div"); tools.className="wad2-row"; this.topTools=tools;
+    tools.innerHTML=`<button data-mode="transfer">${this.t('transfer')}</button><button data-mode="replacement">${this.t('replacement')}</button><button data-multi>Multi Ref OFF</button><button data-transition>${this.t('transition')} OFF</button><button data-a="execute">${this.t('execute')} OFF</button><button data-a="settings">${this.t('settings')}</button><button data-lang>${this.t('lang')}</button>`; root.append(tools);
+    tools.addEventListener("click",e=>{const button=e.target.closest("button");if(!button)return;const s=this.state.segments[this.selected];if(button.dataset.mode&&s){this.state.segments.forEach(segment=>segment.mode=button.dataset.mode);this.syncReplacement(button.dataset.mode==="replacement");this.persist();this.render();return}if(button.hasAttribute("data-multi")&&s){s.multi_ref=!s.multi_ref;this.syncMultiRef(s.multi_ref);this.persist();this.render();return}if(button.hasAttribute("data-transition")){setVal(this.node,K.transition,!Boolean(val(this.node,K.transition,false)));this.render();return}if(button.hasAttribute("data-lang")){this.lang=this.lang==="zh"?"en":"zh";localStorage.setItem("sqr_ui_lang",this.lang);this.node.properties ||= {};this.node.properties.sqr_ui_lang=this.lang;this.build();this.refreshSource(true);return}if(button.dataset.a)this.action(button.dataset.a)});
+    this.video=document.createElement("video"); this.video.className="wad2-video"; this.video.controls=true; this.video.muted=true; this.video.preload="metadata"; root.append(this.video);
+    this.video.addEventListener("timeupdate",()=>{if(!this.scrubbing){const s=this.videoSettings(),target=s.force_rate>0?s.force_rate:(this.rawVideoInfo?.fps||this.fps),start=s.skip_first_frames/target;this.playhead=clamp(Math.round((this.video.currentTime-start)*this.fps),0,this.total-1);this.draw()}});
+    this.canvas=document.createElement("canvas"); this.canvas.className="wad2-canvas"; root.append(this.canvas); this.bindCanvas();
+    this.promptWrap=document.createElement("div");this.promptWrap.className="wad2-prompt-wrap";this.promptWrap.innerHTML=`<div class="wad2-prompt-head"><b data-prompt-title></b><span class="wad2-muted" data-prompt-hint></span></div><textarea class="wad2-prompt"></textarea>`;root.append(this.promptWrap);this.promptInput=this.promptWrap.querySelector('textarea');this.promptInput.addEventListener('input',()=>{const segment=this.state.segments[this.selected];if(segment){segment.positive=this.promptInput.value;clearTimeout(this.promptSaveTimer);this.promptSaveTimer=setTimeout(()=>this.persist(),250)}});
+    const cutTools=document.createElement("div");cutTools.className="wad2-row";cutTools.innerHTML=`<button data-a="split">${this.t('cut')}</button><button data-a="extract">${this.t('extract')}</button><button class="danger" data-a="delete">${this.t('delete')}</button><span class="wad2-muted">${this.t('dragTip')}</span>`;root.append(cutTools);cutTools.addEventListener("click",e=>{const a=e.target.closest("button")?.dataset.a;if(a)this.action(a)});
+    const ed=document.createElement("div");ed.className="wad2-editor";root.append(ed);
+    const left=document.createElement("div");left.className="wad2-panel";ed.append(left);this.left=left;
+    this.settings=document.createElement("div");this.settings.className="wad2-panel";this.settings.style.display="none";root.append(this.settings);
+    this.host.append(root); this.render();
   }
-
-  label(text) {
-    const el = document.createElement("span");
-    el.className = "wad-label";
-    el.textContent = text;
-    return el;
+  resizePreview(){if(!this.video)return;const width=Math.max(320,this.host.clientWidth||this.node.size?.[0]||760),height=clamp(Math.round(width*.48),140,420),segment=this.state.segments[this.selected],refCount=clamp((segment?.references?.length||0)+(segment?.guide_frame?.path?1:0)||1,1,6),usable=Math.max(116,width-42-(refCount-1)*10),refSize=clamp(Math.floor(usable/refCount),116,300),sizeKey=`${width}:${height}:${refSize}`;this.video.style.height=`${height}px`;this.root?.style.setProperty('--wad-ref-size',`${refSize}px`);this.widget?.computeSize&&(this.widget.computeSize=w=>[w,height+refSize+410]);if(sizeKey!==this._lastLayoutSize){this._lastLayoutSize=sizeKey;requestAnimationFrame(()=>{this.draw();this.node.setDirtyCanvas?.(true,false)})}}
+  bindCanvas() {
+    const frameAt=e=>clamp(Math.round((e.offsetX/Math.max(1,this.canvas.clientWidth))*this.total),0,this.total);
+    this.canvas.addEventListener("pointerdown",e=>{const f=frameAt(e),tolerance=Math.max(2,Math.round(this.total*8/this.canvas.clientWidth));this.dragBoundary=this.state.segments.findIndex((s,i)=>i<this.state.segments.length-1&&Math.abs(s.end-f)<=tolerance);if(this.dragBoundary<0){this.scrubbing=true;this.resumeAfterScrub=!this.video.paused;if(this.resumeAfterScrub)this.video.pause();this.scrub(f)}this.canvas.setPointerCapture(e.pointerId)});
+    this.canvas.addEventListener("pointermove",e=>{if(this.dragBoundary>=0){const a=this.state.segments[this.dragBoundary],b=this.state.segments[this.dragBoundary+1],cut=clamp(frameAt(e),a.start+60,b.end-60);a.end=cut;b.start=cut;this.draw()}else if(this.scrubbing)this.scrub(frameAt(e))});
+    const finish=()=>{if(this.dragBoundary>=0){this.dragBoundary=-1;this.persist();this.render();return}if(!this.scrubbing)return;this.scrubbing=false;this.seek();const idx=this.state.segments.findIndex(s=>this.playhead>=s.start&&this.playhead<s.end);if(idx>=0)this.selected=idx;this.render();if(this.resumeAfterScrub)this.video.play().catch(()=>{});this.resumeAfterScrub=false};
+    this.canvas.addEventListener("pointerup",finish);this.canvas.addEventListener("pointercancel",finish);
   }
-
-  makeToggle(label, widgetName, extra = "") {
-    const btn = document.createElement("button");
-    btn.className = `wad-btn ${extra}`;
-    btn.addEventListener("click", () => {
-      const next = !wadReadBool(this.node, widgetName);
-      wadSetWidget(this.node, widgetName, next);
-      this.syncFromWidgets();
-      this.persist();
-      this.render();
-    });
-    btn.dataset.widgetName = widgetName;
-    btn.dataset.label = label;
-    return btn;
+  videoNode(){const id=Number.parseInt(String(val(this.node,K.videoId,"")).trim(),10);return Number.isFinite(id)?app.graph?.getNodeById?.(id):null}
+  videoSettings(){const n=this.videoNode(),read=(name,fallback)=>{const v=n?.widgets?.find(w=>w.name===name)?.value;const num=Number(v);return Number.isFinite(num)?num:fallback};return {force_rate:read("force_rate",0),skip_first_frames:Math.max(0,read("skip_first_frames",0)),frame_load_cap:Math.max(0,read("frame_load_cap",0)),select_every_nth:Math.max(1,read("select_every_nth",1))}}
+  settingsSignature(){const s=this.videoSettings();return `${this.sourceName()}|${s.force_rate}|${s.skip_first_frames}|${s.frame_load_cap}|${s.select_every_nth}`}
+  applyVideoSettings(){if(!this.rawVideoInfo?.frames)return;const oldTotal=this.total,s=this.videoSettings(),sourceFps=Math.max(.01,this.rawVideoInfo.fps),targetRate=s.force_rate>0?s.force_rate:sourceFps,forcedTotal=Math.max(1,Math.round(this.rawVideoInfo.frames*targetRate/sourceFps)),available=Math.max(0,forcedTotal-s.skip_first_frames),sampled=Math.ceil(available/s.select_every_nth),effective=s.frame_load_cap>0?Math.min(sampled,s.frame_load_cap):sampled;this.mediaTotal=Math.max(1,effective);this.mediaFps=Math.max(.01,targetRate/s.select_every_nth);const last=this.state.segments.at(-1);if(last&&(last.end===oldTotal||this.state.segments.length===1))last.end=this.mediaTotal;this.playhead=clamp(this.playhead,0,this.mediaTotal-1);this.persist();this.render()}
+  syncExternal(){const signature=this.settingsSignature();if(signature!==this._settingsSignature){const name=this.sourceName();if(name!==this._source)this.refreshSource(true);else{this._settingsSignature=signature;this.applyVideoSettings()}}}
+  sourceName(){const n=this.videoNode();if(!n)return "";const w=n.widgets?.find(x=>x.name==="video");const v=w?.value;return typeof v==="string"?v:(v?.filename||"")}
+  async refreshSource(force=true){const name=this.sourceName();if(!name||(!force&&name===this._source))return;this._source=name;this._settingsSignature=this.settingsSignature();this.video.src=`/view?filename=${encodeURIComponent(name)}&type=input`;this.video.load();try{const response=await fetch(`/sqr/video_info?file=${encodeURIComponent(name)}`),info=await response.json();if(info.ok&&info.frames>0){this.rawVideoInfo={frames:Number(info.frames),fps:Number(info.fps)||16};this.applyVideoSettings()}}catch(error){console.warn("[WanAni Director] video metadata unavailable",error)}}
+  setGraphWidget(target,name,value){const w=target?.widgets?.find(x=>x.name===name);if(!w||w.value===value)return false;w.value=value;w.callback?.(value);target.setDirtyCanvas?.(true,true);return true}
+  syncMultiRef(enabled){for(const n of app.graph?._nodes||[]){const cls=n?.comfyClass||n?.type;if(cls==="SQRScail2ColoredMaskAdvanced"){const current=n.widgets?.find(w=>w.name==="identity_mode")?.value;this.setGraphWidget(n,"identity_mode",enabled&&current==="multi_person_multi_reference"?"multi_person_multi_reference":(enabled?"single_person_multi_reference":"multi_person"))}}}
+  syncReplacement(enabled){for(const n of app.graph?._nodes||[]){const cls=n?.comfyClass||n?.type;if(cls==="SQRScail2ColoredMaskAdvanced"||cls==="SQRSCAIL2TransitionToVideo")this.setGraphWidget(n,"replacement_mode",Boolean(enabled))}}
+  timelineTime(){const s=this.videoSettings(),target=s.force_rate>0?s.force_rate:(this.rawVideoInfo?.fps||this.fps);return s.skip_first_frames/target+(this.playhead*s.select_every_nth)/target}
+  scrub(frame){this.playhead=clamp(frame,0,this.total-1);this.draw();if(this.scrubRAF)return;this.scrubRAF=requestAnimationFrame(()=>{this.scrubRAF=0;if(Number.isFinite(this.video.duration))this.video.currentTime=this.timelineTime()})}
+  seek(){if(Number.isFinite(this.video.duration))this.video.currentTime=this.timelineTime();this.draw()}
+  action(a){
+    if(a==="extract"){this.extractGuideFrame();return}
+    let s=this.state.segments[this.selected]; if(a==="split"){const idx=this.state.segments.findIndex(x=>this.playhead>x.start&&this.playhead<x.end);s=this.state.segments[idx];if(!s)return;const left=this.playhead-s.start,right=s.end-this.playhead;if(left<60||right<60){alert(`无法切片：切点左右必须各保留至少 60 帧。当前为 ${left} / ${right} 帧。`);return}const n={...s,id:`seg_${Date.now()}`,start:this.playhead,positive:"",guide_frame:null,color:segmentColor(this.state.nextColorIndex++),references:(s.references||[]).map(x=>typeof x==='string'?{path:x,background:false}:{...x})};s.end=this.playhead;this.state.segments.splice(idx+1,0,n);this.selected=idx+1}
+    if(a==="merge"&&s&&this.selected<this.state.segments.length-1){const n=this.state.segments[this.selected+1];s.end=n.end;this.state.segments.splice(this.selected+1,1)}
+    if(a==="delete"&&this.state.segments.length>1){const deletedIndex=this.selected,old=this.state.segments.splice(deletedIndex,1)[0];if(deletedIndex>0){this.state.segments[deletedIndex-1].end=old.end;this.selected=deletedIndex-1}else{this.state.segments[0].start=old.start;this.selected=0}}
+    if(a==="execute"){const next=!Boolean(val(this.node,K.execute,false));if(next&&!String(this.state.segments[0]?.positive||'').trim()){alert(this.t('promptRequired'));return}setVal(this.node,K.execute,next)}
+    if(a==="settings"){this.settings.style.display=this.settings.style.display==="none"?"block":"none"}
+    this.persist();this.render();
   }
-
-  numberInput(widgetName, min, max) {
-    const input = document.createElement("input");
-    input.className = "wad-num";
-    input.type = "number";
-    input.min = String(min);
-    input.max = String(max);
-    input.value = String(wadReadInt(this.node, widgetName, min));
-    input.addEventListener("change", () => {
-      let v = Number.parseInt(input.value || min, 10);
-      v = Math.max(min, Math.min(max, Number.isFinite(v) ? v : min));
-      input.value = String(v);
-      wadSetWidget(this.node, widgetName, v);
-      this.persist();
-      this.render();
-    });
-    return input;
+  render(){this.renderLeft();this.renderPrompt();if(this.settings.style.display!=="none")this.renderSettings();this.draw();const s=this.state.segments[this.selected]||this.state.segments[0],ex=this.root.querySelector('[data-a="execute"]');this.topTools.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('on',b.dataset.mode===(s?.mode||'transfer')));const multi=this.topTools.querySelector('[data-multi]');multi.textContent=`Multi Ref ${s?.multi_ref?'ON':'OFF'}`;multi.classList.toggle('on',Boolean(s?.multi_ref));const transition=this.topTools.querySelector('[data-transition]'),transitionOn=Boolean(val(this.node,K.transition,false));transition.textContent=`${this.t('transition')} ${transitionOn?'ON':'OFF'}`;transition.classList.toggle('on',transitionOn);ex.textContent=`${this.t('execute')} ${val(this.node,K.execute,false)?"ON":"OFF"}`;ex.classList.toggle("on",Boolean(val(this.node,K.execute,false)));this.root.querySelector(".wad2-time").textContent=`${this.playhead}f / ${this.total}f · ${(this.playhead/this.fps).toFixed(2)}s`;requestAnimationFrame(()=>this.resizePreview())}
+  effectivePrompt(index){let result='';for(let i=0;i<=index;i++){const value=String(this.state.segments[i]?.positive||'').trim();if(value)result=value}return result}
+  renderPrompt(){const segment=this.state.segments[this.selected];if(!segment||!this.promptInput)return;this.promptWrap.querySelector('[data-prompt-title]').textContent=`${this.t('positive')} · ${this.t('segment')} ${this.selected+1}`;const inherited=!String(segment.positive||'').trim()&&this.selected>0;this.promptWrap.querySelector('[data-prompt-hint]').textContent=this.selected===0?this.t('promptRequired'):(inherited?`${this.t('inherited')}: ${this.effectivePrompt(this.selected-1).slice(0,80)}`:this.t('inherited'));if(document.activeElement!==this.promptInput)this.promptInput.value=segment.positive||'';this.promptInput.placeholder=this.selected===0?this.t('promptRequired'):this.t('inherited')}
+  renderLeft(){const s=this.state.segments[this.selected]||this.state.segments[0],guide=s?.guide_frame?.path||'';this.left.innerHTML=`<div class="wad2-segs"><div class="wad2-equal"><span>${this.t('equal')}</span><input type="number" min="1" max="100" value="${this.state.segments.length}" data-equal-count><button data-equal-apply>${this.t('apply')}</button></div>${this.state.segments.map((x,i)=>`<button class="wad2-chip ${i===this.selected?'on':''}" style="border-left:5px solid ${x.color||segmentColor(i)}" data-i="${i}">${this.t('segment')} ${i+1}<br>${x.start}–${x.end}f</button>`).join("")}</div><div class="wad2-row" style="margin:7px 0"><label class="wad2-ref-upload"><button>${this.t('reference')}</button><input type="file" accept="image/*" multiple></label><button data-adjust ${guide&&(s?.references||[]).length?'':'disabled'}>${this.t('adjust')}</button><span class="wad2-muted">${this.t('uploadTip')}</span></div><div class="wad2-row"><b>${this.t('segmentRefs')}</b><span class="wad2-muted">${this.t('refTip')}</span></div>${!s?.multi_ref?`<div class="wad2-warning">⚠ ${this.t('singleWarning')}</div>`:''}<div class="wad2-refs">${guide?`<div class="wad2-ref-wrap"><div class="wad2-ref wad2-guide" title="${esc(this.t('guide'))}"><img src="/sqr/image_thumb?file=${encodeURIComponent(guide)}"><span>${this.t('guide')}</span></div><div class="wad2-ref-size wad2-guide-label">${this.imageInfoCache.get(guide)||'…'}</div></div>`:''}${(s?.references||[]).map((r,i)=>{const path=this.refPath(r);return `<div class="wad2-ref-wrap"><div class="wad2-ref ${r?.background?'bg':''}" draggable="true" data-r="${i}" title="${esc(path)}"><img loading="lazy" data-ref-image="${i}" src="/sqr/image_thumb?file=${encodeURIComponent(path)}"><span>${r?.background?this.t('background'):this.t('person')}</span><i>×</i></div><div class="wad2-ref-size" data-ref-size="${i}">${this.imageInfoCache.get(path)||'…'}</div></div>`}).join("")||(!guide?`<span class="wad2-muted">${this.selected>0?this.t('inheritRefs'):this.t('noRefs')}</span>`:'')}</div>`;
+    this.left.querySelectorAll("[data-i]").forEach(b=>b.onclick=()=>{this.selected=Number(b.dataset.i);const selected=this.state.segments[this.selected];this.syncMultiRef(Boolean(selected?.multi_ref));this.syncReplacement(selected?.mode==="replacement");this.render()});this.left.querySelectorAll("[data-r]").forEach(r=>{r.onclick=e=>{const i=Number(r.dataset.r);if(e.target.tagName==="I")s.references.splice(i,1);else s.references[i].background=!s.references[i].background;this.persist();this.render()}})
+    this.left.querySelector('.wad2-ref-upload input').onchange=e=>this.uploadReferences(e.target.files);
+    this.left.querySelector('[data-adjust]').onclick=()=>this.openAdjustModal();
+    const equalInput=this.left.querySelector('[data-equal-count]');this.left.querySelector('[data-equal-apply]').onclick=()=>this.applyEqualSegments(equalInput.value);equalInput.onkeydown=e=>{if(e.key==='Enter')this.applyEqualSegments(equalInput.value)};
+    this.bindReferenceDragging(s);this.bindNaturalImageSizes(s);this.loadReferenceSizes(s);if(guide)this.loadSingleImageSize(guide,this.left.querySelector('.wad2-guide-label'));
   }
-
-  textInput(label, widgetName) {
-    const wrap = document.createElement("label");
-    wrap.className = "wad-small";
-    wrap.textContent = label;
-    const input = document.createElement("input");
-    input.className = "wad-text";
-    input.value = wadReadString(this.node, widgetName);
-    input.addEventListener("change", () => {
-      wadSetWidget(this.node, widgetName, input.value.trim());
-      this.persist();
-    });
-    wrap.appendChild(input);
-    return wrap;
-  }
-
-  syncFromWidgets() {
-    for (const btn of [this.multiBtn, this.replaceBtn, this.transBtn, this.execBtn]) {
-      const on = wadReadBool(this.node, btn.dataset.widgetName);
-      btn.classList.toggle("on", on);
-      btn.textContent = `${btn.dataset.label} ${on ? "ON" : "OFF"}`;
-    }
-    if (this.refsArea && this.refsArea.value !== wadReadString(this.node, WAD_KEYS.refs)) {
-      this.refsArea.value = wadReadString(this.node, WAD_KEYS.refs);
-    }
-  }
-
-  persist() {
-    const data = {
-      version: 1,
-      segments: wadReadInt(this.node, WAD_KEYS.segments, 1),
-      start: wadReadInt(this.node, WAD_KEYS.start, 1),
-      multi_ref: wadReadBool(this.node, WAD_KEYS.multiRef),
-      replacement: wadReadBool(this.node, WAD_KEYS.replacement),
-      transition: wadReadBool(this.node, WAD_KEYS.transition),
-      execute: wadReadBool(this.node, WAD_KEYS.execute),
-      refs: wadReadString(this.node, WAD_KEYS.refs),
-      updated_at: Date.now(),
-    };
-    wadSetWidget(this.node, WAD_KEYS.data, JSON.stringify(data));
-  }
-
-  render() {
-    if (!this.canvas || !this.ctx) return;
-    const rect = this.canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(320, Math.floor(rect.width || this.node.size?.[0] || 640));
-    const h = 156;
-    this.canvas.width = Math.floor(w * dpr);
-    this.canvas.height = Math.floor(h * dpr);
-    this.canvas.style.height = `${h}px`;
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const ctx = this.ctx;
-    ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "#222";
-    ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = "#999";
-    ctx.font = "10px ui-monospace,Consolas,monospace";
-
-    const total = Math.max(1, wadReadInt(this.node, WAD_KEYS.totalFrames, 0));
-    const segments = Math.max(1, wadReadInt(this.node, WAD_KEYS.segments, 1));
-    const fps = Math.max(1, Number(wadGetWidget(this.node, WAD_KEYS.frameRate)?.value || 24));
-    const duration = total / fps;
-    this.timeEl.textContent = `${duration.toFixed(2)}s / ${total} frames`;
-
-    const pad = 12;
-    const y = 48;
-    const barH = 52;
-    ctx.fillStyle = "#141414";
-    ctx.fillRect(pad, y, w - pad * 2, barH);
-    for (let i = 0; i < segments; i++) {
-      const x0 = pad + (w - pad * 2) * i / segments;
-      const x1 = pad + (w - pad * 2) * (i + 1) / segments;
-      ctx.fillStyle = i % 2 ? "#31594d" : "#3f6c5d";
-      ctx.fillRect(x0 + 1, y + 1, Math.max(1, x1 - x0 - 2), barH - 2);
-      ctx.fillStyle = "#f2fff7";
-      ctx.textAlign = "center";
-      ctx.fillText(`SEG ${i + 1}`, (x0 + x1) / 2, y + 25);
-      const start = Math.round(total * i / segments);
-      const end = Math.round(total * (i + 1) / segments);
-      ctx.fillStyle = "rgba(255,255,255,.72)";
-      ctx.fillText(`${start}-${end}`, (x0 + x1) / 2, y + 40);
-    }
-    const startSeg = wadReadInt(this.node, WAD_KEYS.start, 1);
-    if (startSeg >= 1 && startSeg <= segments) {
-      const x0 = pad + (w - pad * 2) * (startSeg - 1) / segments;
-      ctx.strokeStyle = "#ffd166";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x0 + 2, y + 2, (w - pad * 2) / segments - 4, barH - 4);
-    }
-  }
-
-  destroy() {
-    this.resizeObserver?.disconnect();
-  }
+  bindReferenceDragging(segment){this.left.querySelectorAll('.wad2-ref[data-r]').forEach(card=>{card.ondragstart=e=>{this.dragRefIndex=Number(card.dataset.r);card.classList.add('dragging');e.dataTransfer.effectAllowed='move'};card.ondragend=()=>{this.dragRefIndex=-1;card.classList.remove('dragging');this.left.querySelectorAll('.drag-over').forEach(x=>x.classList.remove('drag-over'))};card.ondragover=e=>{e.preventDefault();card.classList.add('drag-over');e.dataTransfer.dropEffect='move'};card.ondragleave=()=>card.classList.remove('drag-over');card.ondrop=e=>{e.preventDefault();const from=this.dragRefIndex,to=Number(card.dataset.r);if(Number.isInteger(from)&&from>=0&&from!==to){const [moved]=segment.references.splice(from,1);segment.references.splice(to,0,moved);this.persist();this.render()}this.dragRefIndex=-1}})}
+  async extractGuideFrame(){const segment=this.state.segments[this.selected],video=this.sourceName();if(!segment||!video)return;try{const response=await fetch('/sqr/extract_frame',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video,time_seconds:this.timelineTime()})}),data=await response.json();if(!data.ok)throw new Error(data.error||'extract failed');segment.guide_frame={path:data.path,frame:this.playhead};this.persist();this.render()}catch(error){alert(`${this.t('extract')}: ${error}`)}}
+  async loadSingleImageSize(path,element){if(!path||!element)return;let label=this.imageInfoCache.get(path);if(!label){try{const response=await fetch(`/sqr/image_info?file=${encodeURIComponent(path)}`),info=await response.json();if(info.ok)label=`${info.width} × ${info.height}`}catch{}}if(label){this.imageInfoCache.set(path,label);element.textContent=label}}
+  openAdjustModal(){const segment=this.state.segments[this.selected],guide=this.refPath(segment?.guide_frame);if(!segment||!guide||!segment.references?.length)return;const modal=document.createElement('div');modal.className='wad2-adjust-modal';modal.innerHTML=`<div class="wad2-adjust-box"><div class="wad2-adjust-tabs"></div><div class="wad2-adjust-stage"><img class="wad2-adjust-bg" src="/sqr/image_thumb?file=${encodeURIComponent(guide)}"><img class="wad2-adjust-overlay"></div><div class="wad2-adjust-controls"><label>${this.t('scale')} <input data-scale type="range" min="0.1" max="3" step="0.01" value="1"></label><span data-scale-value>1.00×</span><label>${this.t('opacity')} <input data-opacity type="range" min="0.1" max="1" step="0.05" value="0.55"></label><button data-save>${this.t('save')}</button><button data-close>${this.t('close')}</button></div></div>`;document.body.appendChild(modal);const tabs=modal.querySelector('.wad2-adjust-tabs'),stage=modal.querySelector('.wad2-adjust-stage'),overlay=modal.querySelector('.wad2-adjust-overlay'),scaleInput=modal.querySelector('[data-scale]'),opacityInput=modal.querySelector('[data-opacity]'),scaleValue=modal.querySelector('[data-scale-value]'),shortName=(path,i)=>{const full=this.refPath(path).split(/[/\\]/).pop()||`ref_${i+1}`,dot=full.lastIndexOf('.'),ext=dot>0?full.slice(dot):'',base=dot>0?full.slice(0,dot):full,short=base.length>16?`${base.slice(0,9)}…${base.slice(-5)}`:base;return `${i+1}. ${short}${ext}`};let index=0,offsetX=0,offsetY=0,dragging=false,lastX=0,lastY=0;const update=()=>{const scale=Number(scaleInput.value);overlay.style.opacity=opacityInput.value;overlay.style.transform=`translate(${offsetX*100}%,${offsetY*100}%) scale(${scale})`;scaleValue.textContent=`${scale.toFixed(2)}×`};const select=i=>{index=i;offsetX=0;offsetY=0;scaleInput.value='1';overlay.src=`/sqr/image_thumb?file=${encodeURIComponent(this.refPath(segment.references[index]))}`;tabs.querySelectorAll('button').forEach((b,n)=>b.classList.toggle('on',n===i));update()};segment.references.forEach((ref,i)=>{const b=document.createElement('button');b.textContent=shortName(ref,i);b.title=this.refPath(ref).split(/[/\\]/).pop()||'';b.onclick=()=>select(i);tabs.appendChild(b)});scaleInput.oninput=update;opacityInput.oninput=update;stage.onwheel=e=>{e.preventDefault();scaleInput.value=String(clamp(Number(scaleInput.value)+(e.deltaY<0?.05:-.05),.1,3));update()};stage.onpointerdown=e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;stage.setPointerCapture(e.pointerId)};stage.onpointermove=e=>{if(!dragging)return;offsetX+=(e.clientX-lastX)/stage.clientWidth;offsetY+=(e.clientY-lastY)/stage.clientHeight;lastX=e.clientX;lastY=e.clientY;update()};stage.onpointerup=()=>dragging=false;modal.querySelector('[data-close]').onclick=()=>modal.remove();modal.querySelector('[data-save]').onclick=async()=>{try{const original=segment.references[index],response=await fetch('/sqr/adjust_reference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:this.refPath(original),scale:Number(scaleInput.value),offset_x:offsetX,offset_y:offsetY})}),data=await response.json();if(!data.ok)throw new Error(data.error||'adjust failed');segment.references[index]={path:data.path,background:Boolean(original?.background)};this.imageInfoCache.set(data.path,`${data.width} × ${data.height}`);const tab=tabs.querySelectorAll('button')[index];if(tab){tab.textContent=shortName(segment.references[index],index);tab.title=data.path}this.persist();this.render();select(index)}catch(error){alert(`${this.t('adjust')}: ${error}`)}};select(0)}
+  bindNaturalImageSizes(segment){this.left.querySelectorAll('img[data-ref-image]').forEach(img=>{const index=Number(img.dataset.refImage),path=this.refPath(segment.references[index]),apply=()=>{if(!img.naturalWidth||!img.naturalHeight)return;const label=`${img.naturalWidth} × ${img.naturalHeight}`;this.imageInfoCache.set(path,label);const el=this.left?.querySelector(`[data-ref-size="${index}"]`);if(el)el.textContent=label};if(img.complete)apply();else img.addEventListener('load',apply,{once:true})})}
+  async loadReferenceSizes(segment){for(let i=0;i<(segment?.references||[]).length;i++){const path=this.refPath(segment.references[i]);if(!path||this.imageInfoCache.has(path))continue;try{const response=await fetch(`/sqr/image_info?file=${encodeURIComponent(path)}`),info=await response.json();if(info.ok){const label=`${info.width} × ${info.height}`;this.imageInfoCache.set(path,label);const el=this.left?.querySelector(`[data-ref-size="${i}"]`);if(el&&segment===this.state.segments[this.selected])el.textContent=label}}catch{}}}
+  applyEqualSegments(value){const count=clamp(Math.round(Number(value)||1),1,100),maxCount=Math.max(1,Math.min(100,Math.floor(this.total/60)));if(count>maxCount){alert(this.lang==='zh'?`无法平均分为 ${count} 段：每段至少需要 60 帧。当前视频最多可分为 ${maxCount} 段。`:`Cannot create ${count} segments: each needs at least 60 frames. This video allows at most ${maxCount}.`);return}const previous=this.state.segments,template=previous[this.selected]||previous[0]||{mode:"transfer",multi_ref:false};this.state.segments=Array.from({length:count},(_,i)=>{const old=previous[i],start=Math.round(this.total*i/count),end=Math.round(this.total*(i+1)/count);return {id:old?.id||`seg_${Date.now()}_${i}`,start,end,enabled:true,positive:old?.positive||"",mode:template.mode||"transfer",multi_ref:Boolean(template.multi_ref),references:(old?.references||[]).map(r=>typeof r==='string'?{path:r,background:false}:{...r}),color:old?.color||segmentColor(this.state.nextColorIndex++)}});this.selected=Math.min(this.selected,count-1);this.syncMultiRef(Boolean(template.multi_ref));this.syncReplacement(template.mode==="replacement");this.persist();this.render()}
+  renderSettings(){const fields=[[K.videoId,this.t('videoId')],[K.refId,this.t('refId')],[K.motionId,this.t('motionId')],[K.outputId,this.t('outputId')]];this.settings.innerHTML=`<b>${this.t('idTitle')}</b><div class="wad2-settings">${fields.map(([k,l])=>`<label>${l}<input data-k="${k}" value="${esc(val(this.node,k,''))}"></label>`).join("")}</div><div class="wad2-muted" style="margin-top:6px">${this.t('videoNote')}</div>`;this.settings.querySelectorAll("input").forEach(i=>i.onchange=()=>{setVal(this.node,i.dataset.k,i.value.trim());this.refreshSource();this.persist()})}
+  draw(){const c=this.canvas,ctx=c.getContext("2d"),dpr=devicePixelRatio||1,w=Math.max(400,c.clientWidth),h=96;if(c.width!==Math.floor(w*dpr)||c.height!==Math.floor(h*dpr)){c.width=Math.floor(w*dpr);c.height=Math.floor(h*dpr)}ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);ctx.fillStyle="#151515";ctx.fillRect(0,0,w,h);for(let i=0;i<=10;i++){const x=w*i/10;ctx.strokeStyle="#2d2d2d";ctx.beginPath();ctx.moveTo(x,18);ctx.lineTo(x,h);ctx.stroke();ctx.fillStyle="#888";ctx.font="9px monospace";ctx.fillText(Math.round(this.total*i/10),x+2,11)}this.state.segments.forEach((s,i)=>{const x=s.start/this.total*w,x2=s.end/this.total*w;ctx.fillStyle=s.color||segmentColor(i);ctx.globalAlpha=i===this.selected?1:.76;ctx.fillRect(x+1,25,Math.max(2,x2-x-2),55);ctx.globalAlpha=1;ctx.fillStyle="#fff";ctx.font="11px system-ui";ctx.fillText(`段 ${i+1}`,x+7,47);ctx.font="9px monospace";ctx.fillStyle="#fff";ctx.fillText(`${s.start}–${s.end} · ${s.end-s.start}f`,x+7,64);if(i<this.state.segments.length-1){ctx.fillStyle="#f4f4f4";ctx.fillRect(x2-1,23,2,59);ctx.beginPath();ctx.arc(x2,82,4,0,Math.PI*2);ctx.fill()}});const px=this.playhead/this.total*w;ctx.save();ctx.shadowColor="#ff3030";ctx.shadowBlur=10;ctx.strokeStyle="#ff3030";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(px,15);ctx.lineTo(px,h);ctx.stroke();ctx.fillStyle="#ff3030";ctx.beginPath();ctx.moveTo(px-6,15);ctx.lineTo(px+6,15);ctx.lineTo(px,23);ctx.closePath();ctx.fill();ctx.restore()}
+  async uploadReferences(files){const s=this.state.segments[this.selected];if(!s||!files?.length)return;const room=5-(s.references||[]).length;if(room<=0){alert("当前分段最多只能使用 5 张参考图");return}const fd=new FormData();[...files].slice(0,room).forEach(f=>fd.append("files[]",f));try{const response=await fetch("/sqr/upload_images",{method:"POST",body:fd}),data=await response.json();s.references=s.references||[];for(const path of data.saved||[])if(!s.references.some(r=>r.path===path))s.references.push({path,background:false});this.persist();this.render()}catch(error){alert(`参考图上传失败: ${error}`)}}
+  persist(){this.state.version=3;this.state.source_video={node_id:String(val(this.node,K.videoId,"")),fps:this.fps,total_frames:this.total};const data=JSON.stringify(this.state);let changed=false;changed=setVal(this.node,K.data,data)||changed;changed=setVal(this.node,K.count,this.state.segments.length)||changed;changed=setVal(this.node,K.refs,JSON.stringify(this.state.segments.map(s=>s.references||[])))||changed;changed=setVal(this.node,K.multi,this.state.segments.some(s=>s.multi_ref))||changed;changed=setVal(this.node,K.replace,this.state.segments.some(s=>s.mode==="replacement"))||changed;if(changed)this.node.setDirtyCanvas?.(true,true)}
+  destroy(){clearInterval(this.timer);this.resizeObserver?.disconnect();if(this.scrubRAF)cancelAnimationFrame(this.scrubRAF)}
 }
 
-app.registerExtension({
-  name: "WanAniDirector.UI",
-  async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== "WanAniDirector") return;
-
-    const origCreated = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function () {
-      const r = origCreated?.apply(this, arguments);
-      this.size[0] = Math.max(this.size?.[0] || 0, 760);
-      this.size[1] = Math.max(this.size?.[1] || 0, 520);
-
-      for (const name of [
-        WAD_KEYS.transition, WAD_KEYS.execute, WAD_KEYS.resume,
-        WAD_KEYS.refVideoId, WAD_KEYS.outputId, WAD_KEYS.animateId,
-        WAD_KEYS.refId, WAD_KEYS.refs, WAD_KEYS.resumePath,
-        WAD_KEYS.multiRef, WAD_KEYS.replacement, WAD_KEYS.data,
-        "sqr_save_png", "sqr_frame_offset", "sqr_pre_segments"
-      ]) {
-        wadHideWidget(wadGetWidget(this, name));
-      }
-
-      const container = document.createElement("div");
-      const widget = this.addDOMWidget("wan_ani_director_ui", "wan_ani_director_ui", container, {
-        getValue: () => "",
-        setValue: () => {},
-      });
-      widget.computeSize = width => [width, 390];
-      setTimeout(() => {
-        this._wanAniDirector?.destroy();
-        this._wanAniDirector = new WanAniDirectorUI(this, container, widget);
-      }, 0);
-      return r;
-    };
-
-    const origConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function () {
-      const r = origConfigure?.apply(this, arguments);
-      setTimeout(() => {
-        this._wanAniDirector?.syncFromWidgets();
-        this._wanAniDirector?.render();
-      }, 0);
-      return r;
-    };
-
-    const origRemoved = nodeType.prototype.onRemoved;
-    nodeType.prototype.onRemoved = function () {
-      this._wanAniDirector?.destroy();
-      return origRemoved?.apply(this, arguments);
-    };
-  },
-});
+app.registerExtension({name:"WanAniDirector.UI.Demo2",async beforeRegisterNodeDef(nodeType,nodeData){if(nodeData.name!=="WanAniDirector")return;const created=nodeType.prototype.onNodeCreated;nodeType.prototype.onNodeCreated=function(){const r=created?.apply(this,arguments);this.size=[Math.max(760,this.size?.[0]||0),Math.max(680,this.size?.[1]||0)];Object.values(K).forEach(k=>hide($w(this,k)));["multi_ref_startup_fix","sqr_save_png","sqr_frame_offset","sqr_pre_segments"].forEach(k=>hide($w(this,k)));const host=document.createElement("div"),widget=this.addDOMWidget("wanani_director_demo","wanani_director_demo",host,{getValue:()=>"",setValue:()=>{}});widget.computeSize=w=>[w,590];setTimeout(()=>{this._wad2?.destroy();this._wad2=new Director(this,host,widget)},0);return r};const removed=nodeType.prototype.onRemoved;nodeType.prototype.onRemoved=function(){this._wad2?.destroy();return removed?.apply(this,arguments)}}});

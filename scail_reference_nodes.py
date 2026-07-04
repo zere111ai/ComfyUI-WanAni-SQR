@@ -310,7 +310,17 @@ class SQRScail2ReferenceBatchStack:
                 image_4=None, image_5=None, image_6=None):
         images = [img for img in (image_1, image_2, image_3, image_4, image_5, image_6) if img is not None and img.shape[0] > 0]
         if not images:
-            raise ValueError("Wan SQR Multi Reference needs at least one reference image. In SQR Multi Ref mode, select reference images in the WanAni SQR / WAN ANI DIRECTOR node before executing.")
+            # The outer ComfyUI prompt can evaluate this node milliseconds before
+            # WanAni SQR interrupts that prompt and submits its rewritten per-segment
+            # workflow. Director references are injected only into those rewritten
+            # prompts, so raising here creates a false red error while the real queue
+            # continues normally. Return a harmless preview placeholder; SQR validates
+            # the rewritten segment before submission.
+            placeholder = torch.zeros(
+                (1, max(64, int(height)), max(64, int(width)), 3),
+                dtype=torch.float32,
+            )
+            return (placeholder,)
         refs = [img[:1, :, :, :3] for img in images]
         if match_and_fill and len(refs) > 1:
             refs = _match_and_fill_refs(refs)

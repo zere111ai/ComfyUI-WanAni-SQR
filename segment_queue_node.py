@@ -62,6 +62,90 @@ def calc_segments(total_frames: int, segments: int) -> list:
     return result
 
 
+def parse_director_plan(director_data, total_frames: int) -> list:
+    """Return validated, enabled Director segments as (skip, length, config).
+
+    Director ranges use an end-exclusive frame convention.  We intentionally do
+    not silently snap hand-picked edit points here: the downstream Wan/SCAIL
+    nodes already own their temporal padding, while SQR trims the visible result
+    back to the requested source range.
+    """
+    if not director_data or str(director_data).strip() in ("", "{}"):
+        return []
+    try:
+        data = json.loads(director_data) if isinstance(director_data, str) else director_data
+    except Exception as exc:
+        raise ValueError(f"Director JSON 无法解析: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("segments"), list):
+        raise ValueError("Director 数据缺少 segments 数组")
+
+    result = []
+    previous_end = 0
+    for index, raw in enumerate(data["segments"]):
+        if not isinstance(raw, dict) or not _sqr_to_bool(raw.get("enabled", True), True):
+            continue
+        start = max(0, _sqr_to_int(raw.get("start"), previous_end))
+        end = min(max(0, int(total_frames)), _sqr_to_int(raw.get("end"), start + 1))
+        if end <= start:
+            raise ValueError(f"Director 第 {index + 1} 段范围无效: {start}-{end}")
+        if result and start < previous_end:
+            raise ValueError(f"Director 第 {index + 1} 段与上一段重叠")
+        visible_length = end - start
+        # Wan video latents use 4n+1 frame windows.  Read/generate the smallest
+        # compatible window, then crop back to the exact hand-authored range.
+        model_length = int(math.ceil(max(0, visible_length - 1) / 4.0) * 4) + 1
+        config = copy.deepcopy(raw)
+        config["start"] = start
+        config["end"] = end
+        config["id"] = str(config.get("id") or f"seg_{index + 1}")
+        config["visible_length"] = visible_length
+        config["model_length"] = model_length
+        refs = config.get("references", [])
+        config["references"] = refs if isinstance(refs, list) else []
+        result.append((start, model_length, config))
+        previous_end = end
+    if not result:
+        raise ValueError("Director 没有可执行的有效分段")
+    return result
+
+
+def resolve_director_prompts(director_data) -> list[str]:
+    """Resolve per-segment prompts using forward-fill inheritance."""
+    try:
+        data = json.loads(director_data) if isinstance(director_data, str) else director_data
+    except Exception:
+        return []
+    segments = data.get("segments", []) if isinstance(data, dict) else []
+    resolved, previous = [], ""
+    for segment in segments:
+        if not isinstance(segment, dict) or not _sqr_to_bool(segment.get("enabled", True), True):
+            continue
+        current = str(segment.get("positive", "") or "").strip()
+        if current:
+            previous = current
+        resolved.append(previous)
+    return resolved
+
+
+def replace_director_positive_links(workflow: dict, director_node_id, value: str) -> int:
+    """Replace links from WanAniDirector.positive with the current segment text."""
+    changed = 0
+    source_id = str(director_node_id)
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            continue
+        for key, input_value in list(inputs.items()):
+            if (isinstance(input_value, list) and len(input_value) == 2
+                    and str(input_value[0]) == source_id
+                    and _sqr_to_int(input_value[1], -1) == 0):
+                inputs[key] = value
+                changed += 1
+    return changed
+
+
 def _sqr_to_bool(value, default=False):
     if isinstance(value, bool):
         return value
@@ -1056,6 +1140,7 @@ class SegmentQueueRunner:
             sqr_frame_offset=-1,
             sqr_pre_segments="",
             过渡跳过帧数=-1,
+            director_data="{}",
             prompt=None, extra_pnginfo=None, unique_id=None):
 
         total_frames       = 总帧数
@@ -1085,10 +1170,35 @@ class SegmentQueueRunner:
 
         _plan_frames = max(1, total_frames - _frame_offset) if _frame_offset > 0 else total_frames
 
-        _preview_segments = segments
+        director_plan = []
+        director_prompts = []
+        if director_data and str(director_data).strip() not in ("", "{}"):
+            try:
+                director_plan = parse_director_plan(director_data, _plan_frames)
+                director_prompts = resolve_director_prompts(director_data)
+            except ValueError as exc:
+                _sqr_log(unique_id, f"[SQR] ✗ {exc}")
+                return {}
+            if director_plan and (not director_prompts or not director_prompts[0]):
+                _sqr_log(unique_id, "[SQR] ✗ Director 第一段必须填写 positive 提示词。")
+                return {}
+
+        _preview_segments = len(director_plan) if director_plan else segments
         start_from_segment = max(1, min(从第几段开始, _preview_segments))
-        plan_text = build_plan_text(
-            _plan_frames, _preview_segments, start_from_segment, node_id, frame_rate)
+        if director_plan:
+            rows = ["Director 手动分段计划:"]
+            for idx, (skip, length, cfg) in enumerate(director_plan, 1):
+                mode = "人物替换" if str(cfg.get("mode", "transfer")).lower() == "replacement" else "动作/表情迁移"
+                visible = _sqr_to_int(cfg.get("visible_length"), length)
+                rows.append(
+                    f"  {idx}. {skip}-{skip + visible}帧 ({visible}帧, Wan窗口={length}) | {mode} | "
+                    f"Multi Ref={'ON' if _sqr_to_bool(cfg.get('multi_ref', False)) else 'OFF'} | "
+                    f"参考图={len(cfg.get('references', []))}"
+                )
+            plan_text = "\n".join(rows)
+        else:
+            plan_text = build_plan_text(
+                _plan_frames, _preview_segments, start_from_segment, node_id, frame_rate)
 
         def _do_interrupt():
             try:
@@ -1130,10 +1240,16 @@ class SegmentQueueRunner:
 
         print(f"[SQR] sqr_frame_offset: 参数={sqr_frame_offset}, 实际使用={_frame_offset}"
               f" | 工作流来源={'extra_pnginfo' if _sqr_full_prompt else 'prompt(回退)'}"
-              f" | 分段模式=average")
+              f" | 分段模式={'director' if director_plan else 'average'}")
         _effective_frames = max(1, total_frames - _frame_offset) if _frame_offset > 0 else total_frames
 
-        seg_list = calc_segments(_effective_frames, segments)
+        if director_plan:
+            seg_list = [(skip, limit) for skip, limit, _ in director_plan]
+            segment_configs = [cfg for _, _, cfg in director_plan]
+            _sqr_log(unique_id, f"[SQR] Director 模式: 使用 {len(seg_list)} 个手动分段")
+        else:
+            seg_list = calc_segments(_effective_frames, segments)
+            segment_configs = [{} for _ in seg_list]
         if not seg_list:
             _sqr_log(unique_id, "[SQR] ✗ 没有可执行分段，请检查总帧数和帧偏移。")
             return {}
@@ -1161,6 +1277,7 @@ class SegmentQueueRunner:
 
         ref_images_list = []
         ref_image_groups = []
+        inherited_ref_segments = set()
         if ref_imgs_str:
             if ref_imgs_str.lstrip().startswith("["):
                 try:
@@ -1191,13 +1308,31 @@ class SegmentQueueRunner:
                 import re as _re
                 legacy_refs = _re.findall(r"(?:^|,)\s*(.*?\.(?:png|jpe?g|webp|bmp))(?=,|$)", ref_imgs_str, flags=_re.IGNORECASE)
                 ref_images_list = [x.strip() for x in (legacy_refs or ref_imgs_str.split(",")) if x.strip()]
+        if director_plan:
+            ref_image_groups = [
+                [
+                    _sqr_make_ref_entry(_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x))
+                    for x in cfg.get("references", [])
+                    if _sqr_ref_entry_path(x)
+                ]
+                for cfg in segment_configs
+            ]
+            ref_images_list = [x for group in ref_image_groups for x in group]
         if ref_image_groups:
             prepared_groups = []
             for group in ref_image_groups:
                 prepared = _sqr_prepare_checkpoint_ref_entries(group, unique_id=unique_id)
-                if prepared:
+                if director_plan or prepared:
                     prepared_groups.append(prepared)
             ref_image_groups = prepared_groups
+            if director_plan:
+                previous_group = []
+                for group_index, group in enumerate(ref_image_groups):
+                    if group:
+                        previous_group = group
+                    elif previous_group:
+                        ref_image_groups[group_index] = copy.deepcopy(previous_group)
+                        inherited_ref_segments.add(group_index + 1)
             ref_images_list = [x for group in ref_image_groups for x in group]
         elif ref_images_list:
             ref_images_list = _sqr_prepare_checkpoint_ref_entries(ref_images_list, unique_id=unique_id)
@@ -1312,6 +1447,30 @@ class SegmentQueueRunner:
                 seg_num        = start_idx + i + 1
                 total_segs     = len(seg_list)
                 wf             = copy.deepcopy(base_prompt)
+                seg_config     = segment_configs[seg_num - 1] if seg_num - 1 < len(segment_configs) else {}
+                seg_positive   = director_prompts[seg_num - 1] if seg_num - 1 < len(director_prompts) else ""
+                visible_limit  = _sqr_to_int(seg_config.get("visible_length"), limit)
+                seg_multi_ref  = _sqr_to_bool(seg_config.get("multi_ref", multi_ref_enabled), multi_ref_enabled)
+                seg_replacement = _sqr_to_bool(replacement_enabled) or str(
+                    seg_config.get("mode", "transfer")
+                ).lower() == "replacement"
+                seg_refs = seg_config.get("references", []) if isinstance(seg_config.get("references", []), list) else []
+                if director_plan and seg_num - 1 < len(ref_image_groups):
+                    seg_refs = ref_image_groups[seg_num - 1]
+                if seg_num in inherited_ref_segments:
+                    log(f"  第{seg_num}段未填写参考图，自动沿用上一有效分段的参考图组（{len(seg_refs)}张）")
+                for _node in wf.values():
+                    if not isinstance(_node, dict):
+                        continue
+                    if _node.get("class_type") in ("SQRScail2ColoredMaskAdvanced", "SQRSCAIL2TransitionToVideo"):
+                        _node.setdefault("inputs", {})["replacement_mode"] = seg_replacement
+                    if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
+                        _mask_inputs = _node.setdefault("inputs", {})
+                        _mask_inputs["identity_mode"] = (
+                            "single_person_multi_reference" if seg_multi_ref else "multi_person"
+                        )
+                        if not seg_multi_ref:
+                            _mask_inputs["background_indices"] = ""
                 TRIM           = 16
                 audio_skip_frames = skip
 
@@ -1319,9 +1478,6 @@ class SegmentQueueRunner:
                 transition_supported, _ae_class_type = _sqr_node_supports_transition(wf, ae_nid)
                 transition_frames = _sqr_transition_frame_count(_ae_class_type)
                 transition_added_frames = _sqr_transition_added_frames(_ae_class_type)
-                # Segment continuity must use the same carry/trim path whether the
-                # visible transition option is on or off. Falling back to direct
-                # merging here creates a different seam and can cause frame jumps.
                 force_direct_segment_merge = not transition_supported
                 _ae_inputs_for_mode = wf.get(ae_nid, {}).get("inputs", {}) if ae_nid in wf else {}
                 _sqr_replacement_mode = bool(_ae_inputs_for_mode.get("replacement_mode", False))
@@ -1329,12 +1485,16 @@ class SegmentQueueRunner:
                 _latent_transition_name = (
                     None if (_sqr_replacement_mode or not _supports_latent_transition) else last_latent_name
                 )
-                use_transition = (last_video_path is not None or _latent_transition_name is not None) and transition_supported
+                # OFF means truly independent visual generations. Contiguous source
+                # video frame ranges preserve driving motion; generated video/latent
+                # carry is only allowed when the user explicitly enables transition.
+                use_transition = bool(transition_enabled) and (last_video_path is not None or _latent_transition_name is not None) and transition_supported
                 continuity_mode = "transition-on" if transition_enabled else "transition-off"
+                log(f"  Director模式: replacement={'ON' if seg_replacement else 'OFF'} multi_ref={'ON' if seg_multi_ref else 'OFF'} refs={len(seg_refs)}")
                 log(f"  接缝调试: mode={continuity_mode} supported={transition_supported} class={_ae_class_type} replacement={_sqr_replacement_mode} last_latent={last_latent_name or 'None'} last_video={os.path.basename(last_video_path) if last_video_path else 'None'} use_carry={use_transition}")
                 startup_trim_frames = 0
                 startup_trim_reason = ""
-                if multi_ref_startup_fix and multi_ref_enabled and ref_images_list and _ae_class_type == "SQRSCAIL2TransitionToVideo":
+                if multi_ref_startup_fix and seg_multi_ref and (seg_refs or ref_images_list) and _ae_class_type == "SQRSCAIL2TransitionToVideo":
                     if use_transition:
                         log("  Multi Ref startup fix: skipped on transition segment to avoid duplicated seam motion")
                     elif seg_num == 1:
@@ -1388,14 +1548,14 @@ class SegmentQueueRunner:
 
                 if vc_nid and vc_nid in wf and audio_filename:
                     _real_skip = main_ref_skip_first + skip + _frame_offset
-                    if use_transition:
+                    if use_transition and transition_enabled:
                         audio_skip_frames    = max(0, _real_skip - (transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM))
                         main_audio_frames    = max(0, _real_skip - transition_added_frames)
                         transition_note      = f"主节点skip{_real_skip}-{transition_added_frames}={main_audio_frames}帧, cut_vc skip{_real_skip}-{transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM}={audio_skip_frames}帧"
                     else:
                         audio_skip_frames    = _real_skip
                         main_audio_frames    = _real_skip
-                        transition_note      = f"{_real_skip}帧"
+                        transition_note      = f"{_real_skip}帧" + ("（仅动作接力，画面硬切）" if use_transition else "")
                     audio_start_time  = main_audio_frames / frame_rate
                     audio_tmp_id      = f"sqr_audio_{seg_num}"
                     wf[audio_tmp_id] = {
@@ -1477,13 +1637,26 @@ class SegmentQueueRunner:
                         wf[ae_nid]["inputs"].pop("transition_video", None)
                         wf[ae_nid]["inputs"].pop("transition_latent", None)
                         wf[ae_nid]["inputs"].pop("continue_motion", None)
-                        log(f"  首段无过渡")
+                        if transition_enabled:
+                            log("  首段无过渡")
+                        else:
+                            log("  过渡OFF：不注入上一段画面/latent，按连续源视频帧独立生成后硬切")
 
                 ref_target_id = ri_node_id
-                if multi_ref_enabled:
+                if seg_multi_ref:
                     ref_target_id = (ri_node_id if ri_node_id and wf.get(ri_node_id, {}).get("class_type") in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack") else None) or find_multi_reference_node(wf) or ri_node_id
 
-                if ref_images_list and ref_target_id and ref_target_id in wf:
+                if seg_multi_ref and ref_target_id and ref_target_id in wf:
+                    _target = wf.get(ref_target_id, {})
+                    _target_inputs = _target.get("inputs", {})
+                    _has_existing_ref = any(_target_inputs.get(f"image_{slot}") is not None for slot in range(1, 7))
+                    _available_segment_refs = seg_refs if director_plan else ref_images_list
+                    if not (_available_segment_refs or _has_existing_ref):
+                        log(f"  ✗ 第{seg_num}段启用了 Multi Ref，但没有参考图；已停止后续分段。")
+                        return
+
+                _refs_to_inject = seg_refs if director_plan else ref_images_list
+                if _refs_to_inject and ref_target_id and ref_target_id in wf:
                     def _sqr_ref_entry_to_input_name(img_entry):
                         img_path = _sqr_ref_entry_path(img_entry)
                         if os.path.isabs(img_path):
@@ -1504,10 +1677,10 @@ class SegmentQueueRunner:
                     ref_node = wf.get(ref_target_id, {})
                     ref_class = ref_node.get("class_type", "")
                     ref_inputs = ref_node.setdefault("inputs", {})
-                    if multi_ref_enabled and ref_class in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
-                        active_refs = ref_images_list
+                    if seg_multi_ref and ref_class in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
+                        active_refs = seg_refs if director_plan else (seg_refs or ref_images_list)
                         if ref_image_groups:
-                            group_index = min(i, len(ref_image_groups) - 1)
+                            group_index = min(seg_num - 1, len(ref_image_groups) - 1)
                             active_refs = ref_image_groups[group_index]
                         max_refs = min(len(active_refs), 5)
                         bg_indices = [idx + 1 for idx, entry in enumerate(active_refs[:max_refs]) if _sqr_ref_entry_is_bg(entry)]
@@ -1525,10 +1698,11 @@ class SegmentQueueRunner:
                         bg_note = f", BG={bg_indices}" if bg_indices else ""
                         log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}{bg_note}")
                     else:
-                        if multi_ref_enabled:
+                        if seg_multi_ref:
                             log(f"  ! Multi Ref ON expects reference node ID to point to Wan SQR Multi Reference; current={ref_class or 'Unknown'}, fallback to single image mode")
-                        img_idx = min(i, len(ref_images_list) - 1)
-                        img_entry = ref_images_list[img_idx]
+                        active_single_refs = seg_refs if director_plan else (seg_refs or ref_images_list)
+                        img_idx = 0 if seg_refs else min(seg_num - 1, len(active_single_refs) - 1)
+                        img_entry = _sqr_make_ref_entry(_sqr_ref_entry_path(active_single_refs[img_idx]), False)
                         img_name = _sqr_ref_entry_to_input_name(img_entry)
                         if ref_class in ("WanSQRMultiReference", "SQRScail2ReferenceBatchStack"):
                             for ref_slot in range(1, 7):
@@ -1548,7 +1722,7 @@ class SegmentQueueRunner:
                 total_raw = limit + startup_trim_frames + (transition_added_frames if use_transition else 0)
 
                 image_src = image_src_node
-                if use_transition and transition_image_node is not None:
+                if use_transition and transition_enabled and transition_image_node is not None:
                     prefix_start = 1 if _ae_class_type == "SQRSCAIL2TransitionToVideo" else 0
                     prefix_node = f"sqr_prefix_{seg_num}"
                     wf[prefix_node] = {
@@ -1580,7 +1754,7 @@ class SegmentQueueRunner:
                     final_image_node = ifb_a
                     log(f"  core裁切：不做过渡裁切，输出{trim_len}帧")
                 elif KEEP_FULL_TRANSITION_IN_MERGE:
-                    tail_trim = 0 if is_last_seg else transition_added_frames
+                    tail_trim = transition_added_frames if (use_transition and not is_last_seg) else 0
                     trim_start = startup_trim_frames
                     trim_len = max(1, total_raw - tail_trim - startup_trim_frames)
                     if startup_trim_frames > 0 and use_transition and transition_added_frames > 0:
@@ -1642,8 +1816,21 @@ class SegmentQueueRunner:
                     final_image_node = ifb_b
                     log(f"  裁切：裁前{TRIM}裁后{TRIM}→输出{trim_len}帧")
 
+                if director_plan and visible_limit > 0 and trim_len != visible_limit:
+                    director_crop_id = f"sqr_director_crop_{seg_num}"
+                    wf[director_crop_id] = {
+                        "class_type": "ImageFromBatch",
+                        "inputs": {"image": [final_image_node, 0], "batch_index": 0, "length": visible_limit},
+                    }
+                    final_image_node = director_crop_id
+                    trim_len = visible_limit
+                    log(f"  Director 精确裁切：Wan窗口{limit}帧 → 时间线{visible_limit}帧")
+
                 if vc_nid and vc_nid in wf:
-                    wf[vc_nid]["inputs"]["images"] = image_src
+                    # Keep the user's existing Video Combine node as the live
+                    # per-segment preview target. The hidden full/cut clones are
+                    # still used for transition handoff and reliable file lookup.
+                    wf[vc_nid]["inputs"]["images"] = [final_image_node, 0]
 
                     full_image_node = image_src
                     if startup_trim_frames > 0:
@@ -1690,6 +1877,7 @@ class SegmentQueueRunner:
                             }
                         }
                         cut_inputs["audio"] = [cut_audio_id, 0]
+                        wf[vc_nid]["inputs"]["audio"] = [cut_audio_id, 0]
                         log(f"  ✓ cut_vc音频: start={audio_skip_frames/frame_rate:.3f}s (={audio_skip_frames}帧)")
                     else:
                         full_inputs.pop("audio", None)
@@ -1715,8 +1903,12 @@ class SegmentQueueRunner:
                     }
                     log(f"  ✓ 已启用latent接力保存: {latent_save_id}")
 
-                if unique_id and unique_id in wf:
-                    del wf[unique_id]
+                if unique_id:
+                    positive_links = replace_director_positive_links(wf, unique_id, seg_positive)
+                    if director_plan:
+                        log(f"  Positive提示词: {seg_positive[:120]}{'...' if len(seg_positive) > 120 else ''} (rewired={positive_links})")
+                    if unique_id in wf:
+                        del wf[unique_id]
 
                 if ae_nid and ae_nid in wf:
                     if not _supports_latent_transition:
@@ -1948,6 +2140,8 @@ class SegmentQueueRunner:
 
 class WanAniDirector(SegmentQueueRunner):
     CATEGORY = "video/utils"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("positive",)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1959,7 +2153,9 @@ class WanAniDirector(SegmentQueueRunner):
         return data
 
     def run(self, *args, director_data="{}", **kwargs):
-        return super().run(*args, **kwargs)
+        resolved = resolve_director_prompts(director_data)
+        super().run(*args, director_data=director_data, **kwargs)
+        return (resolved[0] if resolved else "",)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -2209,6 +2405,35 @@ async def sqr_video_thumb(request):
         return web.Response(status=500)
 
 
+@server.PromptServer.instance.routes.get("/sqr/video_info")
+async def sqr_video_info(request):
+    """Return exact source metadata for the Director timeline."""
+    raw_path = request.rel_url.query.get("file", "")
+    fpath = _sqr_resolve_media_path(raw_path)
+    if not fpath or not os.path.isfile(fpath):
+        return web.json_response({"ok": False, "error": "video not found"}, status=404)
+    try:
+        import cv2
+        cap = cv2.VideoCapture(fpath)
+        try:
+            if not cap.isOpened():
+                raise RuntimeError("cv2 could not open video")
+            frames = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            return web.json_response({
+                "ok": True,
+                "frames": frames,
+                "fps": fps,
+                "duration": (frames / fps) if frames > 0 and fps > 0 else 0.0,
+                "filename": os.path.basename(fpath),
+            })
+        finally:
+            cap.release()
+    except Exception as e:
+        _sqr_log_cv2_issue("", "读取 Director 视频信息失败", e)
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
 @server.PromptServer.instance.routes.get("/sqr/browse_videos")
 async def sqr_browse_videos(request):
     import re
@@ -2284,3 +2509,88 @@ async def sqr_image_thumb(request):
         "Pragma": "no-cache",
         "Expires": "0",
     })
+
+
+@server.PromptServer.instance.routes.get("/sqr/image_info")
+async def sqr_image_info(request):
+    fname = request.rel_url.query.get("file", "")
+    path = _sqr_resolve_media_path(fname)
+    if not path or not os.path.isfile(path):
+        return web.json_response({"ok": False, "error": "image not found"}, status=404)
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            width, height = image.size
+        return web.json_response({"ok": True, "width": int(width), "height": int(height)})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@server.PromptServer.instance.routes.post("/sqr/extract_frame")
+async def sqr_extract_frame(request):
+    """Extract a Director guide frame at an exact source-video time."""
+    try:
+        data = await request.json()
+        video_path = _sqr_resolve_media_path(data.get("video", ""))
+        time_seconds = max(0.0, float(data.get("time_seconds", 0.0)))
+        if not video_path or not os.path.isfile(video_path):
+            return web.json_response({"ok": False, "error": "video not found"}, status=404)
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        try:
+            if not cap.isOpened():
+                raise RuntimeError("cv2 could not open video")
+            cap.set(cv2.CAP_PROP_POS_MSEC, time_seconds * 1000.0)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                raise RuntimeError("could not decode requested frame")
+        finally:
+            cap.release()
+        subfolder = "sqr_director_frames"
+        output_dir = os.path.join(folder_paths.get_input_directory(), subfolder)
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"guide_{_sqr_now_stamp()}_{int(time_seconds * 1000):09d}.png"
+        path = os.path.join(output_dir, filename)
+        if not cv2.imwrite(path, frame):
+            raise RuntimeError("could not save extracted frame")
+        return web.json_response({"ok": True, "path": f"{subfolder}/{filename}"})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@server.PromptServer.instance.routes.post("/sqr/adjust_reference")
+async def sqr_adjust_reference(request):
+    """Scale/translate a reference on its original-size gray canvas."""
+    try:
+        data = await request.json()
+        source_path = _sqr_resolve_media_path(data.get("image", ""))
+        if not source_path or not os.path.isfile(source_path):
+            return web.json_response({"ok": False, "error": "reference image not found"}, status=404)
+        scale = max(0.05, min(5.0, float(data.get("scale", 1.0))))
+        offset_x = max(-2.0, min(2.0, float(data.get("offset_x", 0.0))))
+        offset_y = max(-2.0, min(2.0, float(data.get("offset_y", 0.0))))
+        from PIL import Image
+        with Image.open(source_path) as opened:
+            source = opened.convert("RGBA")
+        width, height = source.size
+        resized = source.resize(
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        canvas = Image.new("RGBA", (width, height), (128, 128, 128, 255))
+        left = round((width - resized.width) / 2 + offset_x * width)
+        top = round((height - resized.height) / 2 + offset_y * height)
+        canvas.paste(resized, (left, top), resized)
+        subfolder = "sqr_director_adjusted"
+        output_dir = os.path.join(folder_paths.get_input_directory(), subfolder)
+        os.makedirs(output_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(source_path))[0][:80]
+        filename = f"{base}_adjusted_{_sqr_now_stamp()}.png"
+        output_path = os.path.join(output_dir, filename)
+        canvas.convert("RGB").save(output_path, "PNG")
+        return web.json_response({
+            "ok": True, "path": f"{subfolder}/{filename}",
+            "width": width, "height": height,
+        })
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
