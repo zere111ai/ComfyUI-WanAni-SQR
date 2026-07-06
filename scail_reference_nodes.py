@@ -1,3 +1,4 @@
+import json
 import math
 
 import torch
@@ -461,6 +462,46 @@ class SQRScail2ReferenceBatchSplit:
         return (main_image, additional_images, main_mask, additional_masks)
 
 
+class SQRSAM3NormalizedPoints:
+    """Convert Director's normalized click markers to SAM3 pixel-coordinate JSON."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "points_json": ("STRING", {"default": "{}"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("positive_coords", "negative_coords")
+    FUNCTION = "execute"
+    CATEGORY = "SQR/SCAIL2"
+
+    def execute(self, images, points_json):
+        height, width = int(images.shape[1]), int(images.shape[2])
+        try:
+            data = json.loads(points_json) if isinstance(points_json, str) else points_json
+        except Exception:
+            data = {}
+
+        def convert(items):
+            result = []
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                x = max(0.0, min(1.0, float(item.get("x", 0.0))))
+                y = max(0.0, min(1.0, float(item.get("y", 0.0))))
+                result.append({
+                    "x": int(round(x * max(0, width - 1))),
+                    "y": int(round(y * max(0, height - 1))),
+                })
+            return json.dumps(result, ensure_ascii=False)
+
+        return (convert(data.get("positive", [])), convert(data.get("negative", [])))
+
+
 NODE_CLASS_MAPPINGS = {
     "LHResolutionSetting": LHResolutionSetting,
     "SQRScail2MultiReferenceCanvas": SQRScail2MultiReferenceCanvas,
@@ -468,6 +509,7 @@ NODE_CLASS_MAPPINGS = {
     "WanSQRMultiReference": SQRScail2ReferenceBatchStack,
     "SQRScail2ColoredMaskAdvanced": SQRScail2ColoredMaskAdvanced,
     "SQRScail2ReferenceBatchSplit": SQRScail2ReferenceBatchSplit,
+    "SQRSAM3NormalizedPoints": SQRSAM3NormalizedPoints,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -477,4 +519,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanSQRMultiReference": "Wan SQR Multi Reference",
     "SQRScail2ColoredMaskAdvanced": "SQR SCAIL2 Colored Mask Advanced (Trial)",
     "SQRScail2ReferenceBatchSplit": "SQR SCAIL2 Reference Batch Split (Trial)",
+    "SQRSAM3NormalizedPoints": "SQR SAM3 Director Points",
 }

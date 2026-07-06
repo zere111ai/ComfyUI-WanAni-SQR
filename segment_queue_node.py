@@ -127,6 +127,95 @@ def resolve_director_prompts(director_data) -> list[str]:
     return resolved
 
 
+def first_director_guide_path(director_data) -> str:
+    """Return the first existing extracted Director scale-guide path."""
+    try:
+        data = json.loads(director_data) if isinstance(director_data, str) else director_data
+    except Exception:
+        data = {}
+    segments = data.get("segments", []) if isinstance(data, dict) else []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        guide = segment.get("guide_frame")
+        guide_path = guide.get("path", "") if isinstance(guide, dict) else str(guide or "")
+        path = _sqr_resolve_media_path(guide_path) if guide_path else None
+        if path and os.path.isfile(path):
+            return guide_path
+    return ""
+
+
+def first_director_color_match_config(director_data) -> dict:
+    """Resolve the first guide segment and its first reference/color settings."""
+    try:
+        data = json.loads(director_data) if isinstance(director_data, str) else director_data
+    except Exception:
+        data = {}
+    segments = data.get("segments", []) if isinstance(data, dict) else []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        guide = segment.get("guide_frame")
+        guide_path = guide.get("path", "") if isinstance(guide, dict) else str(guide or "")
+        if not guide_path or not os.path.isfile(_sqr_resolve_media_path(guide_path) or ""):
+            continue
+        references = segment.get("references", [])
+        first_ref = references[0] if isinstance(references, list) and references else ""
+        ref_path = _sqr_ref_entry_path(first_ref)
+        if ref_path and not os.path.isfile(_sqr_resolve_media_path(ref_path) or ""):
+            ref_path = ""
+        ref_strength = first_ref.get("color_match_strength") if isinstance(first_ref, dict) else None
+        strength_value = ref_strength if ref_strength is not None else segment.get("color_match_strength", 1.0)
+        return {
+            "guide_path": guide_path,
+            "reference_path": ref_path,
+            "enabled": _sqr_to_bool(segment.get("color_match", False)),
+            "strength": max(0.0, min(10.0, float(strength_value if strength_value is not None else 1.0))),
+        }
+    return {"guide_path": "", "reference_path": "", "enabled": False, "strength": 1.0}
+
+
+def _sqr_color_match_tensor(image_target, image_ref, strength=1.0):
+    """Apply ColorMatchV2's default MKL method and strength formula."""
+    import torch
+    from color_matcher import ColorMatcher
+
+    target_np = image_target[0].cpu().numpy()
+    ref_np = image_ref[0].cpu().numpy()
+    result = ColorMatcher().transfer(src=target_np, ref=ref_np, method="mkl")
+    strength = max(0.0, min(10.0, float(strength)))
+    if strength != 1.0:
+        result = target_np + strength * (result - target_np)
+    return torch.from_numpy(result).to(torch.float32).clamp_(0, 1).unsqueeze(0)
+
+
+def _sqr_load_image_tensor(path):
+    import numpy as np
+    import torch
+    from PIL import Image, ImageOps
+
+    with Image.open(path) as opened:
+        image = ImageOps.exif_transpose(opened).convert("RGB")
+        array = np.asarray(image, dtype=np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0)
+
+
+def load_first_director_guide_frame(director_data):
+    """Return the first extracted Director scale-guide frame as an IMAGE tensor."""
+    import torch
+
+    config = first_director_color_match_config(director_data)
+    guide_path = _sqr_resolve_media_path(config["guide_path"]) if config["guide_path"] else None
+    if guide_path and os.path.isfile(guide_path):
+        guide = _sqr_load_image_tensor(guide_path)
+        ref_path = _sqr_resolve_media_path(config["reference_path"]) if config["reference_path"] else None
+        if config["enabled"] and ref_path and os.path.isfile(ref_path):
+            return _sqr_color_match_tensor(_sqr_load_image_tensor(ref_path), guide, config["strength"])
+        return guide
+    # Keep the IMAGE socket valid before any guide frame has been extracted.
+    return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+
+
 def replace_director_positive_links(workflow: dict, director_node_id, value: str) -> int:
     """Replace links from WanAniDirector.positive with the current segment text."""
     changed = 0
@@ -293,8 +382,17 @@ def _sqr_ref_entry_is_bg(entry):
     return bool(isinstance(entry, dict) and (entry.get("bg") or entry.get("background") or entry.get("is_bg")))
 
 
-def _sqr_make_ref_entry(path, is_bg=False):
+def _sqr_make_ref_entry(path, is_bg=False, template=None):
     path = str(path or "").strip()
+    if isinstance(template, dict):
+        result = copy.deepcopy(template)
+        result["path"] = path
+        result.pop("image", None)
+        result.pop("file", None)
+        result["background"] = bool(is_bg)
+        result.pop("bg", None)
+        result.pop("is_bg", None)
+        return result
     return {"path": path, "bg": True} if is_bg else path
 
 
@@ -308,7 +406,7 @@ def _sqr_prepare_checkpoint_ref_entries(ref_entries, unique_id=None):
             continue
         kept = _sqr_prepare_checkpoint_ref_images([path], unique_id=unique_id)
         if kept:
-            prepared.append(_sqr_make_ref_entry(kept[0], _sqr_ref_entry_is_bg(entry)))
+            prepared.append(_sqr_make_ref_entry(kept[0], _sqr_ref_entry_is_bg(entry), entry))
     return prepared
 
 _SQR_COMFY_HOST_CACHE = None
@@ -631,6 +729,20 @@ def find_multi_reference_node(prompt: dict) -> str | None:
     return None
 
 
+def find_driving_sam3_node(prompt: dict, video_node_id: str) -> str | None:
+    """Find the SAM3 tracker whose image input comes from the driving video."""
+    source_id = str(video_node_id)
+    fallback = None
+    for nid, node in prompt.items():
+        if node.get("class_type") != "SAM3_VideoTrack":
+            continue
+        fallback = fallback or str(nid)
+        images = node.get("inputs", {}).get("images")
+        if isinstance(images, list) and len(images) == 2 and str(images[0]) == source_id:
+            return str(nid)
+    return fallback
+
+
 def media_has_audio(path: str | None) -> bool:
     """Return True only when the media file contains at least one audio stream."""
     if not path or not os.path.isfile(path):
@@ -648,10 +760,13 @@ def media_has_audio(path: str | None) -> bool:
         if ffprobe:
             result = subprocess.run(
                 [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
             )
             return result.returncode == 0 and bool(result.stdout.strip())
-        result = subprocess.run([ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True, timeout=20)
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
+        )
         return "Audio:" in (result.stderr or "")
     except Exception:
         return False
@@ -1028,7 +1143,7 @@ def merge_videos(video_paths: list, output_path: str, target_fps: float = None,
                           "-r", fps_str,
                           "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                           "-c:a", "copy", tmp]
-                r2 = subprocess.run(cv_cmd, capture_output=True, text=True)
+                r2 = subprocess.run(cv_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 converted.append(tmp if r2.returncode == 0 else vp)
             with open(list_path, "w", encoding="utf-8") as lf:
                 for p in converted:
@@ -1036,7 +1151,7 @@ def merge_videos(video_paths: list, output_path: str, target_fps: float = None,
 
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                "-i", list_path, "-c", "copy", concat_output]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             print(f"[SQR] ffmpeg concat error: {result.stderr[-300:]}")
             return False
@@ -1051,7 +1166,7 @@ def merge_videos(video_paths: list, output_path: str, target_fps: float = None,
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
             "-t", f"{duration:.9f}", "-movflags", "+faststart", output_path,
         ]
-        remux_result = subprocess.run(remux_cmd, capture_output=True, text=True)
+        remux_result = subprocess.run(remux_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if remux_result.returncode == 0:
             return True
         print(f"[SQR] ffmpeg audio remux error: {remux_result.stderr[-300:]}")
@@ -1172,10 +1287,14 @@ class SegmentQueueRunner:
 
         director_plan = []
         director_prompts = []
+        director_guide_path = ""
+        director_color_config = {"enabled": False, "reference_path": "", "strength": 1.0}
         if director_data and str(director_data).strip() not in ("", "{}"):
             try:
                 director_plan = parse_director_plan(director_data, _plan_frames)
                 director_prompts = resolve_director_prompts(director_data)
+                director_guide_path = first_director_guide_path(director_data)
+                director_color_config = first_director_color_match_config(director_data)
             except ValueError as exc:
                 _sqr_log(unique_id, f"[SQR] ✗ {exc}")
                 return {}
@@ -1274,6 +1393,7 @@ class SegmentQueueRunner:
 
         ae_nid = ae_node_id or find_animate_embeds_node(base_prompt) or ""
         vc_nid = find_video_combine_node(base_prompt, combine_nid) or ""
+        driving_sam3_nid = find_driving_sam3_node(base_prompt, node_id) or ""
 
         ref_images_list = []
         ref_image_groups = []
@@ -1311,7 +1431,7 @@ class SegmentQueueRunner:
         if director_plan:
             ref_image_groups = [
                 [
-                    _sqr_make_ref_entry(_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x))
+                    _sqr_make_ref_entry(_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x), x)
                     for x in cfg.get("references", [])
                     if _sqr_ref_entry_path(x)
                 ]
@@ -1546,6 +1666,57 @@ class SegmentQueueRunner:
                     wf[startup_repeat_id]["inputs"]["images"] = [node_id, 0]
                     log(f"  Multi Ref startup fix: repeated first frame x{startup_trim_frames}; rewired_image_links={rewired}")
 
+                sam3_marking = seg_config.get("sam3_marking", {}) if isinstance(seg_config, dict) else {}
+                positive_points = sam3_marking.get("positive", []) if isinstance(sam3_marking, dict) else []
+                negative_points = sam3_marking.get("negative", []) if isinstance(sam3_marking, dict) else []
+                marking_frame = _sqr_to_int(sam3_marking.get("frame"), -1) if isinstance(sam3_marking, dict) else -1
+                if marking_frame != _sqr_to_int(seg_config.get("start"), skip):
+                    if positive_points:
+                        log("  ⚠ SAM3 手动打标帧与当前分段首帧不一致，本段回退到原文字识别")
+                    positive_points = []
+                    negative_points = []
+                if positive_points:
+                    sam3_node = wf.get(driving_sam3_nid, {}) if driving_sam3_nid else {}
+                    sam3_inputs = sam3_node.get("inputs", {}) if isinstance(sam3_node, dict) else {}
+                    sam3_images = sam3_inputs.get("images")
+                    sam3_model = sam3_inputs.get("model")
+                    if sam3_images and sam3_model:
+                        sam3_first_id = f"sqr_sam3_first_frame_{seg_num}"
+                        sam3_points_id = f"sqr_sam3_points_{seg_num}"
+                        sam3_detect_id = f"sqr_sam3_detect_{seg_num}"
+                        wf[sam3_first_id] = {
+                            "class_type": "ImageFromBatch",
+                            "inputs": {"image": sam3_images, "batch_index": 0, "length": 1},
+                        }
+                        wf[sam3_points_id] = {
+                            "class_type": "SQRSAM3NormalizedPoints",
+                            "inputs": {
+                                "images": [sam3_first_id, 0],
+                                "points_json": json.dumps({
+                                    "positive": positive_points,
+                                    "negative": negative_points,
+                                }, ensure_ascii=False),
+                            },
+                        }
+                        wf[sam3_detect_id] = {
+                            "class_type": "SAM3_Detect",
+                            "inputs": {
+                                "model": sam3_model,
+                                "image": [sam3_first_id, 0],
+                                "positive_coords": [sam3_points_id, 0],
+                                "negative_coords": [sam3_points_id, 1],
+                                "threshold": 0.5,
+                                "refine_iterations": 2,
+                                "individual_masks": False,
+                            },
+                        }
+                        sam3_inputs["initial_mask"] = [sam3_detect_id, 0]
+                        sam3_inputs.pop("conditioning", None)
+                        sam3_inputs["max_objects"] = 1
+                        log(f"  SAM3 手动打标: 第{seg_num}段 正向={len(positive_points)} 负向={len(negative_points)}，已锁定单人物跟踪")
+                    else:
+                        log("  ⚠ SAM3 手动打标已保存，但未找到驱动视频 SAM3_VideoTrack 或其模型连接")
+
                 if vc_nid and vc_nid in wf and audio_filename:
                     _real_skip = main_ref_skip_first + skip + _frame_offset
                     if use_transition and transition_enabled:
@@ -1674,6 +1845,43 @@ class SegmentQueueRunner:
                             return img_fname
                         return img_path
 
+                    color_match_enabled = _sqr_to_bool(seg_config.get("color_match", False)) if director_plan else False
+                    guide_entry = seg_config.get("guide_frame", {}) if director_plan else {}
+                    guide_path = _sqr_ref_entry_path(guide_entry)
+                    color_guide_id = None
+                    if color_match_enabled and guide_path:
+                        color_guide_id = f"sqr_color_guide_{seg_num}"
+                        wf[color_guide_id] = {
+                            "class_type": "LoadImage",
+                            "inputs": {"image": _sqr_ref_entry_to_input_name(guide_path)},
+                        }
+
+                    def _sqr_color_matched_ref(img_entry, load_id, ref_slot):
+                        if not color_guide_id:
+                            return [load_id, 0]
+                        strength_value = (
+                            img_entry.get("color_match_strength")
+                            if isinstance(img_entry, dict) else None
+                        )
+                        if strength_value is None:
+                            strength_value = seg_config.get("color_match_strength", 1.0)
+                        try:
+                            strength_value = max(0.0, min(10.0, float(strength_value)))
+                        except Exception:
+                            strength_value = 1.0
+                        color_id = f"sqr_color_match_{seg_num}_{ref_slot}"
+                        wf[color_id] = {
+                            "class_type": "ColorMatchV2",
+                            "inputs": {
+                                "image_target": [load_id, 0],
+                                "image_ref": [color_guide_id, 0],
+                                "method": "mkl",
+                                "strength": strength_value,
+                                "multithread": True,
+                            },
+                        }
+                        return [color_id, 0]
+
                     ref_node = wf.get(ref_target_id, {})
                     ref_class = ref_node.get("class_type", "")
                     ref_inputs = ref_node.setdefault("inputs", {})
@@ -1690,13 +1898,20 @@ class SegmentQueueRunner:
                             img_name = _sqr_ref_entry_to_input_name(img_entry)
                             load_id = f"sqr_mref_{seg_num}_{ref_slot}"
                             wf[load_id] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
-                            ref_inputs[f"image_{ref_slot}"] = [load_id, 0]
+                            ref_inputs[f"image_{ref_slot}"] = _sqr_color_matched_ref(img_entry, load_id, ref_slot)
                         for _node in wf.values():
                             if isinstance(_node, dict) and _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
                                 _node.setdefault("inputs", {})["background_indices"] = ",".join(str(x) for x in bg_indices)
                         group_note = f" group {min(i + 1, len(ref_image_groups))}/{len(ref_image_groups)}" if ref_image_groups else ""
                         bg_note = f", BG={bg_indices}" if bg_indices else ""
                         log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}{bg_note}")
+                        if color_guide_id:
+                            strengths = [
+                                (entry.get("color_match_strength", seg_config.get("color_match_strength", 1.0))
+                                 if isinstance(entry, dict) else seg_config.get("color_match_strength", 1.0))
+                                for entry in active_refs[:max_refs]
+                            ]
+                            log(f"  Color Match 已接入实际 Multi Ref：{max_refs} 张，strength={strengths}")
                     else:
                         if seg_multi_ref:
                             log(f"  ! Multi Ref ON expects reference node ID to point to Wan SQR Multi Reference; current={ref_class or 'Unknown'}, fallback to single image mode")
@@ -1709,13 +1924,15 @@ class SegmentQueueRunner:
                                 ref_inputs.pop(f"image_{ref_slot}", None)
                             load_id = f"sqr_ref_{seg_num}_1"
                             wf[load_id] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
-                            ref_inputs["image_1"] = [load_id, 0]
+                            ref_inputs["image_1"] = _sqr_color_matched_ref(img_entry, load_id, 1)
                         else:
                             ref_inputs["image"] = img_name
                             wv = ref_node.get("widgets_values", [])
                             if wv:
                                 wv[0] = img_name
                         log(f"  OK reference image[{img_idx+1}]: {img_name}")
+                        if color_guide_id:
+                            log("  Color Match 已接入实际单参考图输入")
 
                 TRIM = 16
                 is_last_seg = (seg_num == total_segs)
@@ -1907,6 +2124,55 @@ class SegmentQueueRunner:
                     positive_links = replace_director_positive_links(wf, unique_id, seg_positive)
                     if director_plan:
                         log(f"  Positive提示词: {seg_positive[:120]}{'...' if len(seg_positive) > 120 else ''} (rewired={positive_links})")
+                    guide_node_id = f"sqr_director_guide_{seg_num}"
+                    if director_guide_path:
+                        wf[guide_node_id] = {
+                            "class_type": "LoadImage",
+                            "inputs": {"image": director_guide_path},
+                        }
+                    else:
+                        wf[guide_node_id] = {
+                            "class_type": "EmptyImage",
+                            "inputs": {"width": 1, "height": 1, "batch_size": 1, "color": 0},
+                        }
+                    guide_output = [guide_node_id, 0]
+                    color_ref_path = director_color_config.get("reference_path", "")
+                    if director_color_config.get("enabled") and color_ref_path:
+                        color_target_id = f"sqr_director_color_target_{seg_num}"
+                        color_match_id = f"sqr_director_color_match_{seg_num}"
+                        wf[color_target_id] = {
+                            "class_type": "LoadImage",
+                            "inputs": {"image": color_ref_path},
+                        }
+                        wf[color_match_id] = {
+                            "class_type": "ColorMatchV2",
+                            "inputs": {
+                                "image_target": [color_target_id, 0],
+                                "image_ref": [guide_node_id, 0],
+                                "method": "mkl",
+                                "strength": director_color_config.get("strength", 1.0),
+                                "multithread": True,
+                            },
+                        }
+                        guide_output = [color_match_id, 0]
+                    guide_links = _sqr_rewire_image_output(
+                        wf, [str(unique_id), 1], guide_output
+                    )
+                    if guide_links:
+                        log(
+                            f"  比例引导帧: {'已载入 ' + director_guide_path if director_guide_path else '未提取，使用空白图像'} "
+                            f"(rewired={guide_links})"
+                        )
+                        if director_color_config.get("enabled") and color_ref_path:
+                            log(
+                                f"  Color Match: ON · method=mkl · "
+                                f"strength={director_color_config.get('strength', 1.0):.2f} · 使用第一张参考图"
+                            )
+                    else:
+                        del wf[guide_node_id]
+                        if director_color_config.get("enabled") and color_ref_path:
+                            wf.pop(f"sqr_director_color_target_{seg_num}", None)
+                            wf.pop(f"sqr_director_color_match_{seg_num}", None)
                     if unique_id in wf:
                         del wf[unique_id]
 
@@ -2140,8 +2406,8 @@ class SegmentQueueRunner:
 
 class WanAniDirector(SegmentQueueRunner):
     CATEGORY = "video/utils"
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("positive",)
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("positive", "比例引导帧")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -2154,8 +2420,9 @@ class WanAniDirector(SegmentQueueRunner):
 
     def run(self, *args, director_data="{}", **kwargs):
         resolved = resolve_director_prompts(director_data)
+        guide_frame = load_first_director_guide_frame(director_data)
         super().run(*args, director_data=director_data, **kwargs)
-        return (resolved[0] if resolved else "",)
+        return (resolved[0] if resolved else "", guide_frame)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -2554,6 +2821,97 @@ async def sqr_extract_frame(request):
         if not cv2.imwrite(path, frame):
             raise RuntimeError("could not save extracted frame")
         return web.json_response({"ok": True, "path": f"{subfolder}/{filename}"})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@server.PromptServer.instance.routes.post("/sqr/detect_cuts")
+async def sqr_detect_cuts(request):
+    """Detect hard scene changes in a source-video time range."""
+    try:
+        data = await request.json()
+        video_path = _sqr_resolve_media_path(data.get("video", ""))
+        start_time = max(0.0, float(data.get("start_time", 0.0)))
+        end_time = max(start_time, float(data.get("end_time", start_time)))
+        threshold = max(0.12, min(0.8, float(data.get("threshold", 0.30))))
+        if not video_path or not os.path.isfile(video_path):
+            return web.json_response({"ok": False, "error": "video not found"}, status=404)
+
+        import cv2
+        import numpy as np
+        cap = cv2.VideoCapture(video_path)
+        cuts, previous, previous_hist = [], None, None
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            if fps <= 0:
+                raise RuntimeError("invalid video fps")
+            cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000.0)
+            last_cut_time = start_time - 1.0
+            while True:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                current_time = float(cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
+                if current_time > end_time:
+                    break
+                height, width = frame.shape[:2]
+                scale = min(1.0, 192.0 / max(1, width))
+                small = cv2.resize(frame, (max(32, int(width * scale)), max(18, int(height * scale))))
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                hist = cv2.calcHist([small], [0, 1], None, [24, 24], [0, 256, 0, 256])
+                cv2.normalize(hist, hist)
+                if previous is not None:
+                    pixel_score = float(np.mean(cv2.absdiff(gray, previous))) / 255.0
+                    hist_score = float(cv2.compareHist(previous_hist, hist, cv2.HISTCMP_BHATTACHARYYA))
+                    score = pixel_score * 0.55 + hist_score * 0.45
+                    if score >= threshold and current_time - last_cut_time >= 0.35:
+                        cuts.append({"time_seconds": current_time, "score": round(score, 4)})
+                        last_cut_time = current_time
+                previous, previous_hist = gray, hist
+        finally:
+            cap.release()
+        return web.json_response({"ok": True, "cuts": cuts, "threshold": threshold})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@server.PromptServer.instance.routes.post("/sqr/color_match_preview")
+async def sqr_color_match_preview(request):
+    """Create a small preview using ColorMatchV2's default MKL behavior."""
+    try:
+        data = await request.json()
+        guide_rel = str(data.get("guide", "") or "")
+        target_rel = str(data.get("target", "") or "")
+        guide_path = _sqr_resolve_media_path(guide_rel)
+        target_path = _sqr_resolve_media_path(target_rel)
+        strength = max(0.0, min(10.0, float(data.get("strength", 1.0) or 1.0)))
+        if not guide_path or not os.path.isfile(guide_path):
+            return web.json_response({"ok": False, "error": "guide frame not found"}, status=404)
+        if not target_path or not os.path.isfile(target_path):
+            return web.json_response({"ok": False, "error": "reference image not found"}, status=404)
+
+        matched = _sqr_color_match_tensor(
+            _sqr_load_image_tensor(target_path),
+            _sqr_load_image_tensor(guide_path),
+            strength,
+        )
+        from PIL import Image
+        import numpy as np
+        output = (matched[0].cpu().numpy() * 255.0).round().clip(0, 255).astype(np.uint8)
+        subfolder = "sqr_director_color_preview"
+        output_dir = os.path.join(folder_paths.get_input_directory(), subfolder)
+        os.makedirs(output_dir, exist_ok=True)
+        signature = hashlib.sha1(
+            f"{guide_path}|{os.path.getmtime(guide_path)}|{target_path}|{os.path.getmtime(target_path)}|{strength:.4f}".encode("utf-8")
+        ).hexdigest()[:16]
+        filename = f"color_match_{signature}.png"
+        Image.fromarray(output, mode="RGB").save(os.path.join(output_dir, filename))
+        return web.json_response({
+            "ok": True,
+            "path": f"{subfolder}/{filename}",
+            "width": int(output.shape[1]),
+            "height": int(output.shape[0]),
+        })
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 

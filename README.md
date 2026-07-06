@@ -4,6 +4,25 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-06 — Director Precision Controls and SCAIL-2 Assistance
+
+## Summary--
+Enhance WAN ANI DIRECTOR with per-reference color matching, per-segment SAM3 subject locking, automatic shot-cut detection, and dynamic timeline cleanup while ensuring matched references are used by the actual SCAIL-2 Multi Ref generation path.
+
+## Description--
+This update expands WAN ANI DIRECTOR from a segmentation and reference manager into a precision-control surface for SCAIL-2 workflows.
+
+- Extracted scale-guide frames are now available through a dedicated `IMAGE` output for optional downstream use.
+- Every reference image has an independent manual Color Match preview and strength value. Final jobs use the same `mkl` behavior as `ColorMatchV2` and route each matched result into the real Multi Ref inputs instead of affecting only the UI preview.
+- Added per-segment SAM3 manual tagging. The Director extracts the segment's first frame, accepts positive subject points and negative exclusion points, converts normalized clicks to the active video resolution, and injects the resulting initial mask into the driving-video tracker.
+- SAM3 marks are invalidated and re-extracted when Load Video skip, frame-rate, or sampling settings change.
+- Added lightweight hard-cut detection using adjacent-frame pixel differences and color-histogram distance. Detected cuts can create shot segments for independent SAM3 tagging.
+- The 60-frame minimum remains active with continuous transition enabled. With transition disabled, cutting, boundary dragging, equal segmentation, and shot splitting can create shorter segments.
+- Segment chips now include a direct close region. Old segments extending beyond the current effective Load Video range are highlighted and can be removed without changing valid segment ranges.
+- Fixed segmented reference inheritance, replacement-state propagation, per-segment Video Combine previews, transition-off hard concatenation, and Windows log decoding issues.
+
+Restart ComfyUI and hard-refresh the browser after updating so the new Python nodes, backend routes, and Director frontend are loaded.
+
 ## Update 2026-JUL-05 — WAN ANI DIRECTOR
 
 ## Summary--
