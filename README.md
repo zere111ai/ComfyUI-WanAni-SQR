@@ -4,6 +4,29 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-16 — WAN ANI DIRECTOR Multi-Person SCAIL-2 Control
+
+## Summary--
+Extend WAN ANI DIRECTOR into a tested SCAIL-2 multi-person/multi-reference directing console with grouped identity references, character-lock prompt assistance, safer SAM3 routing, improved guide-frame handling, and context-window batch protection.
+
+## Description--
+This update focuses on the production SCAIL-2 Director workflow after multi-reference, SAM3 tagging, Color Match, and segmented generation testing.
+
+- Added experimental multi-person multi-reference support for Director/SCAIL-2 workflows, including grouped reference routing such as 2 people x 3 refs or 3 people x 2 refs.
+- Improved reference-image mask grouping so multi-person reference masks follow the intended character groups instead of assigning every reference image to the same SAM/color identity.
+- Added Character Lock prompt assistance. Per-character descriptions can be composed into each segment's positive prompt to help preserve clothing, hairstyle, face, and identity details during SCAIL-2 generation.
+- Preserved the global mode design: Director still chooses either motion/expression transfer or character replacement globally, while segment-level controls focus on timing, references, masks, prompts, and identity guidance.
+- Improved guide-frame behavior in the per-segment reference area. Extracted scale-guide frames can be removed manually and automatically wrap below completed six-reference groups so they no longer block the main references.
+- Restored and hardened SAM3 routing for video masks after Director changes, including single-person manual point tagging and multi-person SCAIL-2 mask routing.
+- Added safer handling for stale or out-of-range segments after Load Video skip/frame-cap changes, including segment close controls that can remove invalid hidden ranges without disturbing valid segments.
+- Added a Director/SCAIL-2 batch guard: `SQR SCAIL2 Transition To Video` now forces video-queue execution to `batch_size=1` if an external workflow value accidentally passes a larger batch, preventing ComfyUI context-window CUDA index errors.
+- Kept Color Match outputs connected to the real reference path so matched reference images are used by generation, not only by frontend previews.
+
+Recommended workflow target:
+- `SCAIL2-导演台-多参动作迁移-分段队列 V6-正式版`
+
+Restart ComfyUI and hard-refresh the browser after updating so the new Python node logic, backend routes, and Director frontend are loaded.
+
 ## Update 2026-JUL-06 — Director Precision Controls and SCAIL-2 Assistance
 
 ## Summary--

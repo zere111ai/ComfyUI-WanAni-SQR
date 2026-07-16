@@ -110,6 +110,19 @@ class SQRSCAIL2TransitionToVideo:
                 clip_vision_output=None, previous_frames=None, transition_video=None,
                 transition_latent=None):
         original_length = length
+        requested_batch_size = int(batch_size)
+        if requested_batch_size != 1:
+            # SCAIL-2 video conditioning and ComfyUI context windows expect one
+            # timeline per execution. A larger latent batch can make the context
+            # window sampler index conditioning tensors as if they had matching
+            # batch dimensions, causing CUDA "index out of bounds" aborts.
+            log.warning(
+                "[SQR-SCAIL-TRANS] batch_size=%s is not supported for Director/SCAIL2 "
+                "video queue execution; forcing batch_size=1 to avoid context-window "
+                "index errors",
+                requested_batch_size,
+            )
+            batch_size = 1
         transition_latent_samples = None
         if transition_latent is not None:
             transition_latent_samples = transition_latent.get("samples")

@@ -127,6 +127,67 @@ def resolve_director_prompts(director_data) -> list[str]:
     return resolved
 
 
+def _sqr_director_character_lock_text(segment: dict) -> str:
+    if not isinstance(segment, dict):
+        return ""
+    lock_data = segment.get("character_lock", {})
+    if not isinstance(lock_data, dict):
+        lock_data = {}
+    enabled = _sqr_to_bool(lock_data.get("enabled", True), True)
+    descriptions = lock_data.get("descriptions", {})
+    if not isinstance(descriptions, dict):
+        descriptions = {}
+    people = sorted({
+        _sqr_ref_entry_person(ref)
+        for ref in segment.get("references", [])
+        if isinstance(ref, dict) and _sqr_ref_entry_person(ref) > 0 and not _sqr_ref_entry_is_bg(ref)
+    })
+    lines = []
+    for person in people:
+        text = str(
+            descriptions.get(str(person))
+            or descriptions.get(person)
+            or ""
+        ).strip()
+        if text:
+            lines.append(f"P{person}: {text}")
+    if not enabled or not lines:
+        return ""
+    result = [
+        "Character lock:",
+        *lines,
+        "Preserve each P character's face, hairstyle, outfit, color palette, and identity from that character's own reference images.",
+    ]
+    if _sqr_to_bool(lock_data.get("no_swap", True), True) and len(lines) > 1:
+        result.append("Do not swap clothes, hair, face, colors, or identity between P characters.")
+    return " ".join(result)
+
+
+def compose_director_positive(base_prompt: str, segment: dict) -> str:
+    base = str(base_prompt or "").strip()
+    lock_text = _sqr_director_character_lock_text(segment)
+    if lock_text:
+        return f"{base}\n\n{lock_text}" if base else lock_text
+    return base
+
+
+def resolve_director_composed_prompts(director_data) -> list[str]:
+    try:
+        data = json.loads(director_data) if isinstance(director_data, str) else director_data
+    except Exception:
+        return []
+    segments = data.get("segments", []) if isinstance(data, dict) else []
+    resolved, previous = [], ""
+    for segment in segments:
+        if not isinstance(segment, dict) or not _sqr_to_bool(segment.get("enabled", True), True):
+            continue
+        current = str(segment.get("positive", "") or "").strip()
+        if current:
+            previous = current
+        resolved.append(compose_director_positive(previous, segment))
+    return resolved
+
+
 def first_director_guide_path(director_data) -> str:
     """Return the first existing extracted Director scale-guide path."""
     try:
@@ -380,6 +441,34 @@ def _sqr_ref_entry_path(entry):
 
 def _sqr_ref_entry_is_bg(entry):
     return bool(isinstance(entry, dict) and (entry.get("bg") or entry.get("background") or entry.get("is_bg")))
+
+
+def _sqr_ref_entry_person(entry):
+    if not isinstance(entry, dict):
+        return 0
+    for key in ("person", "person_id", "identity", "group"):
+        value = entry.get(key)
+        try:
+            value = int(value)
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
+def _sqr_ref_identity_groups(ref_entries, max_refs=6):
+    grouped = {}
+    for index, entry in enumerate((ref_entries or [])[:max_refs]):
+        if _sqr_ref_entry_is_bg(entry):
+            continue
+        person = _sqr_ref_entry_person(entry)
+        if person > 0:
+            grouped.setdefault(person, []).append(index)
+    groups = [indexes for _, indexes in sorted(grouped.items()) if indexes]
+    if len(groups) < 2:
+        return "", 0
+    return "|".join(",".join(str(index) for index in group) for group in groups), len(groups)
 
 
 def _sqr_make_ref_entry(path, is_bg=False, template=None):
@@ -1286,19 +1375,21 @@ class SegmentQueueRunner:
         _plan_frames = max(1, total_frames - _frame_offset) if _frame_offset > 0 else total_frames
 
         director_plan = []
+        director_base_prompts = []
         director_prompts = []
         director_guide_path = ""
         director_color_config = {"enabled": False, "reference_path": "", "strength": 1.0}
         if director_data and str(director_data).strip() not in ("", "{}"):
             try:
                 director_plan = parse_director_plan(director_data, _plan_frames)
-                director_prompts = resolve_director_prompts(director_data)
+                director_base_prompts = resolve_director_prompts(director_data)
+                director_prompts = resolve_director_composed_prompts(director_data)
                 director_guide_path = first_director_guide_path(director_data)
                 director_color_config = first_director_color_match_config(director_data)
             except ValueError as exc:
                 _sqr_log(unique_id, f"[SQR] ✗ {exc}")
                 return {}
-            if director_plan and (not director_prompts or not director_prompts[0]):
+            if director_plan and (not director_base_prompts or not director_base_prompts[0]):
                 _sqr_log(unique_id, "[SQR] ✗ Director 第一段必须填写 positive 提示词。")
                 return {}
 
@@ -1563,6 +1654,7 @@ class SegmentQueueRunner:
                 else:
                     log(f"⚠ 续跑已启用但视频无效，首段无过渡")
 
+            previous_character_lock = None
             for i, (skip, limit) in enumerate(segs_to_run):
                 seg_num        = start_idx + i + 1
                 total_segs     = len(seg_list)
@@ -1579,6 +1671,17 @@ class SegmentQueueRunner:
                     seg_refs = ref_image_groups[seg_num - 1]
                 if seg_num in inherited_ref_segments:
                     log(f"  第{seg_num}段未填写参考图，自动沿用上一有效分段的参考图组（{len(seg_refs)}张）")
+                if director_plan:
+                    _prompt_base = director_base_prompts[seg_num - 1] if seg_num - 1 < len(director_base_prompts) else ""
+                    _prompt_config = copy.deepcopy(seg_config) if isinstance(seg_config, dict) else {}
+                    _prompt_config["references"] = seg_refs
+                    _char_lock = _prompt_config.get("character_lock")
+                    if isinstance(_char_lock, dict) and _char_lock.get("descriptions"):
+                        previous_character_lock = copy.deepcopy(_char_lock)
+                    elif previous_character_lock is not None:
+                        _prompt_config["character_lock"] = copy.deepcopy(previous_character_lock)
+                    seg_positive = compose_director_positive(_prompt_base, _prompt_config)
+                seg_ref_identity_groups, seg_ref_person_count = _sqr_ref_identity_groups(seg_refs, max_refs=6)
                 for _node in wf.values():
                     if not isinstance(_node, dict):
                         continue
@@ -1587,10 +1690,16 @@ class SegmentQueueRunner:
                     if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
                         _mask_inputs = _node.setdefault("inputs", {})
                         _mask_inputs["identity_mode"] = (
-                            "single_person_multi_reference" if seg_multi_ref else "multi_person"
+                            "multi_person_multi_reference" if (seg_multi_ref and seg_ref_identity_groups) else (
+                                "single_person_multi_reference" if seg_multi_ref else "multi_person"
+                            )
                         )
+                        if seg_ref_identity_groups:
+                            _mask_inputs["ref_identity_groups"] = seg_ref_identity_groups
                         if not seg_multi_ref:
                             _mask_inputs["background_indices"] = ""
+                if seg_ref_person_count > 1 and driving_sam3_nid and driving_sam3_nid in wf:
+                    wf[driving_sam3_nid].setdefault("inputs", {})["max_objects"] = min(6, seg_ref_person_count)
                 TRIM           = 16
                 audio_skip_frames = skip
 
@@ -1670,6 +1779,10 @@ class SegmentQueueRunner:
                 positive_points = sam3_marking.get("positive", []) if isinstance(sam3_marking, dict) else []
                 negative_points = sam3_marking.get("negative", []) if isinstance(sam3_marking, dict) else []
                 marking_frame = _sqr_to_int(sam3_marking.get("frame"), -1) if isinstance(sam3_marking, dict) else -1
+                if seg_ref_person_count > 1 and positive_points:
+                    log("  ℹ 多人多参模式：忽略旧的单人 SAM3 手动打标，保留视频 SAM 提示词自动识别")
+                    positive_points = []
+                    negative_points = []
                 if marking_frame != _sqr_to_int(seg_config.get("start"), skip):
                     if positive_points:
                         log("  ⚠ SAM3 手动打标帧与当前分段首帧不一致，本段回退到原文字识别")
@@ -1720,9 +1833,9 @@ class SegmentQueueRunner:
                 if vc_nid and vc_nid in wf and audio_filename:
                     _real_skip = main_ref_skip_first + skip + _frame_offset
                     if use_transition and transition_enabled:
-                        audio_skip_frames    = max(0, _real_skip - (transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM))
+                        audio_skip_frames    = _real_skip
                         main_audio_frames    = max(0, _real_skip - transition_added_frames)
-                        transition_note      = f"主节点skip{_real_skip}-{transition_added_frames}={main_audio_frames}帧, cut_vc skip{_real_skip}-{transition_added_frames if KEEP_FULL_TRANSITION_IN_MERGE else TRIM}={audio_skip_frames}帧"
+                        transition_note      = f"主节点skip{_real_skip}-{transition_added_frames}={main_audio_frames}帧, cut_vc从原分段边界{audio_skip_frames}帧开始"
                     else:
                         audio_skip_frames    = _real_skip
                         main_audio_frames    = _real_skip
@@ -1890,7 +2003,7 @@ class SegmentQueueRunner:
                         if ref_image_groups:
                             group_index = min(seg_num - 1, len(ref_image_groups) - 1)
                             active_refs = ref_image_groups[group_index]
-                        max_refs = min(len(active_refs), 5)
+                        max_refs = min(len(active_refs), 6)
                         bg_indices = [idx + 1 for idx, entry in enumerate(active_refs[:max_refs]) if _sqr_ref_entry_is_bg(entry)]
                         for ref_slot in range(1, 7):
                             ref_inputs.pop(f"image_{ref_slot}", None)
@@ -1901,10 +2014,15 @@ class SegmentQueueRunner:
                             ref_inputs[f"image_{ref_slot}"] = _sqr_color_matched_ref(img_entry, load_id, ref_slot)
                         for _node in wf.values():
                             if isinstance(_node, dict) and _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
-                                _node.setdefault("inputs", {})["background_indices"] = ",".join(str(x) for x in bg_indices)
+                                _mask_inputs = _node.setdefault("inputs", {})
+                                _mask_inputs["background_indices"] = ",".join(str(x) for x in bg_indices)
+                                if seg_ref_identity_groups:
+                                    _mask_inputs["identity_mode"] = "multi_person_multi_reference"
+                                    _mask_inputs["ref_identity_groups"] = seg_ref_identity_groups
                         group_note = f" group {min(i + 1, len(ref_image_groups))}/{len(ref_image_groups)}" if ref_image_groups else ""
                         bg_note = f", BG={bg_indices}" if bg_indices else ""
-                        log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}{bg_note}")
+                        person_note = f", persons={seg_ref_person_count}, groups={seg_ref_identity_groups}" if seg_ref_identity_groups else ""
+                        log(f"  OK Multi Ref{group_note}: loaded {max_refs} reference images into {ref_class}{bg_note}{person_note}")
                         if color_guide_id:
                             strengths = [
                                 (entry.get("color_match_strength", seg_config.get("color_match_strength", 1.0))
@@ -1971,35 +2089,16 @@ class SegmentQueueRunner:
                     final_image_node = ifb_a
                     log(f"  core裁切：不做过渡裁切，输出{trim_len}帧")
                 elif KEEP_FULL_TRANSITION_IN_MERGE:
-                    tail_trim = transition_added_frames if (use_transition and not is_last_seg) else 0
-                    trim_start = startup_trim_frames
-                    trim_len = max(1, total_raw - tail_trim - startup_trim_frames)
-                    if startup_trim_frames > 0 and use_transition and transition_added_frames > 0:
-                        prefix_len = min(transition_added_frames, trim_len)
-                        body_len = max(0, trim_len - prefix_len)
-                        if body_len > 0:
-                            ifb_prefix = f"sqr_ifb_{seg_num}_startup_prefix"
-                            ifb_body = f"sqr_ifb_{seg_num}_startup_body"
-                            concat_node = f"sqr_concat_{seg_num}_startup"
-                            wf[ifb_prefix] = {"class_type": "ImageFromBatch",
-                                              "inputs": {"image": image_src, "batch_index": 0, "length": prefix_len}}
-                            wf[ifb_body] = {"class_type": "ImageFromBatch",
-                                            "inputs": {"image": image_src, "batch_index": transition_added_frames + startup_trim_frames, "length": body_len}}
-                            wf[concat_node] = {"class_type": "SQRImageBatchConcat",
-                                               "inputs": {"images_a": [ifb_prefix, 0], "images_b": [ifb_body, 0]}}
-                            final_image_node = concat_node
-                        else:
-                            ifb_a = f"sqr_ifb_{seg_num}_a"
-                            wf[ifb_a] = {"class_type": "ImageFromBatch",
-                                         "inputs": {"image": image_src, "batch_index": 0, "length": trim_len}}
-                            final_image_node = ifb_a
-                    else:
-                        ifb_a = f"sqr_ifb_{seg_num}_a"
-                        wf[ifb_a] = {"class_type": "ImageFromBatch",
-                                     "inputs": {"image": image_src, "batch_index": trim_start, "length": trim_len}}
-                        final_image_node = ifb_a
+                    transition_prefix_trim = transition_added_frames if use_transition else 0
+                    trim_start = startup_trim_frames + transition_prefix_trim
+                    trim_len = max(1, total_raw - startup_trim_frames - transition_prefix_trim)
+                    tail_trim = 0
+                    ifb_a = f"sqr_ifb_{seg_num}_a"
+                    wf[ifb_a] = {"class_type": "ImageFromBatch",
+                                 "inputs": {"image": image_src, "batch_index": trim_start, "length": trim_len}}
+                    final_image_node = ifb_a
                     if use_transition:
-                        log(f"  裁切：读取{transition_frames}帧过渡（有效新增{transition_added_frames}帧），裁后{tail_trim}帧→输出{trim_len}帧")
+                        log(f"  裁切：读取{transition_frames}帧过渡（有效前缀{transition_added_frames}帧仅用于采样），合并前裁掉前缀→输出{trim_len}帧")
                     else:
                         log(f"  裁切：不裁前，裁后{tail_trim}帧→输出{trim_len}帧")
                     if startup_trim_frames > 0:
@@ -2419,7 +2518,7 @@ class WanAniDirector(SegmentQueueRunner):
         return data
 
     def run(self, *args, director_data="{}", **kwargs):
-        resolved = resolve_director_prompts(director_data)
+        resolved = resolve_director_composed_prompts(director_data)
         guide_frame = load_first_director_guide_frame(director_data)
         super().run(*args, director_data=director_data, **kwargs)
         return (resolved[0] if resolved else "", guide_frame)
@@ -2790,6 +2889,266 @@ async def sqr_image_info(request):
             width, height = image.size
         return web.json_response({"ok": True, "width": int(width), "height": int(height)})
     except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+def _sqr_remove_solid_background(image, threshold=32, feather=18):
+    """Remove only near-solid pixels connected to the image boundary."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    rgba = image.convert("RGBA")
+    array = np.asarray(rgba, dtype=np.float32).copy()
+    h, w = array.shape[:2]
+    sample = max(1, min(h, w, 24))
+    corners = np.concatenate((
+        array[:sample, :sample, :3].reshape(-1, 3),
+        array[:sample, -sample:, :3].reshape(-1, 3),
+        array[-sample:, :sample, :3].reshape(-1, 3),
+        array[-sample:, -sample:, :3].reshape(-1, 3),
+    ), axis=0)
+    background = np.median(corners, axis=0)
+    distance = np.sqrt(np.sum((array[:, :, :3] - background) ** 2, axis=2))
+    threshold = max(1.0, min(220.0, float(threshold)))
+    feather = max(1.0, min(96.0, float(feather)))
+    candidate = (distance < threshold + feather).astype(np.uint8)
+    _, labels = cv2.connectedComponents(candidate, connectivity=4)
+    edge_labels = np.unique(np.concatenate((
+        labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]
+    )))
+    edge_labels = edge_labels[edge_labels != 0]
+    connected = np.isin(labels, edge_labels) if edge_labels.size else np.zeros_like(candidate, dtype=bool)
+    keyed_alpha = np.clip((distance - threshold) / feather, 0.0, 1.0) * array[:, :, 3]
+    array[:, :, 3] = np.where(connected, keyed_alpha, array[:, :, 3])
+    return Image.fromarray(np.clip(array, 0, 255).astype(np.uint8), "RGBA")
+
+
+_sqr_sam3_segment_instance = None
+_sqr_sam3_segment_lock = threading.Lock()
+
+
+@server.PromptServer.instance.routes.post("/sqr/sam3_cutout")
+async def sqr_sam3_cutout(request):
+    """Create and cache an alpha cutout with the installed RMBG SAM3 node."""
+    try:
+        import nodes
+        import numpy as np
+        import torch
+        from PIL import Image, ImageOps
+
+        payload = await request.json()
+        source_path = _sqr_resolve_media_path(str(payload.get("image") or ""))
+        if not source_path or not os.path.isfile(source_path):
+            raise FileNotFoundError("Source image was not found.")
+        prompt_text = str(payload.get("prompt") or "person").strip() or "person"
+        confidence = max(0.05, min(0.95, float(payload.get("confidence", 0.5))))
+        mask_blur = max(0, min(64, _sqr_to_int(payload.get("mask_blur"), 2)))
+        mask_offset = max(-64, min(64, _sqr_to_int(payload.get("mask_offset"), 0)))
+
+        node_class = nodes.NODE_CLASS_MAPPINGS.get("SAM3Segment")
+        if node_class is None:
+            raise RuntimeError("SAM3 Segmentation (RMBG) is not installed or failed to load.")
+        with Image.open(source_path) as opened:
+            source = ImageOps.exif_transpose(opened).convert("RGB")
+        tensor = torch.from_numpy(np.asarray(source, dtype=np.float32) / 255.0).unsqueeze(0)
+
+        global _sqr_sam3_segment_instance
+        with _sqr_sam3_segment_lock:
+            if _sqr_sam3_segment_instance is None:
+                _sqr_sam3_segment_instance = node_class()
+            _, masks, _ = _sqr_sam3_segment_instance.segment(
+                tensor, prompt_text, "Auto",
+                confidence_threshold=confidence,
+                max_segments=0,
+                segment_pick=0,
+                mask_blur=mask_blur,
+                mask_offset=mask_offset,
+                invert_output=False,
+                unload_model=False,
+                background="Alpha",
+                background_color="#000000",
+                output_mode="Merged",
+            )
+        if masks is None or masks.numel() == 0:
+            raise RuntimeError("SAM3 did not return a mask for this prompt.")
+        mask = masks[0].detach().float().clamp(0, 1).cpu().numpy()
+        if float(mask.max()) <= 0.001:
+            raise RuntimeError("SAM3 found no matching subject. Try a more specific prompt or lower confidence.")
+        alpha = Image.fromarray((mask * 255.0).astype(np.uint8), "L")
+        result = source.convert("RGBA")
+        result.putalpha(alpha)
+
+        subfolder = "sqr_sam3_cutouts"
+        output_dir = os.path.join(folder_paths.get_input_directory(), subfolder)
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"sqr_sam3_{_sqr_now_stamp()}.png"
+        result.save(os.path.join(output_dir, filename), "PNG")
+        return web.json_response({
+            "ok": True,
+            "path": f"{subfolder}/{filename}",
+            "width": result.width,
+            "height": result.height,
+        })
+    except Exception as e:
+        print(f"[SQR] sam3_cutout error: {_sqr_format_exc(e)}")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@server.PromptServer.instance.routes.get("/sqr/image_original")
+async def sqr_image_original(request):
+    """Serve the original image bytes for full-resolution editor previews."""
+    try:
+        path = _sqr_resolve_media_path(request.rel_url.query.get("file", ""))
+        if not path or not os.path.isfile(path):
+            raise FileNotFoundError("Image was not found.")
+        return web.FileResponse(path)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=404)
+
+
+@server.PromptServer.instance.routes.post("/sqr/select_save_directory")
+async def sqr_select_save_directory(request):
+    """Open the native Windows directory picker on the ComfyUI host."""
+    try:
+        import asyncio
+
+        def choose_directory():
+            import base64
+            import subprocess
+
+            initial = folder_paths.get_input_directory().replace("'", "''")
+            script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$owner = New-Object System.Windows.Forms.Form
+$owner.Text = 'LH Image Editor'
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.ShowInTaskbar = $false
+$owner.TopMost = $true
+$owner.Opacity = 0.01
+$owner.Show()
+$owner.Activate()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select LH Image Editor save folder'
+$dialog.SelectedPath = '{initial}'
+$dialog.ShowNewFolderButton = $true
+try {{
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {{
+        [Console]::Out.Write($dialog.SelectedPath)
+    }}
+}} finally {{
+    $owner.Close()
+    $owner.Dispose()
+}}
+"""
+            encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+            completed = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-STA", "-EncodedCommand", encoded],
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=300,
+            )
+            if completed.returncode != 0:
+                error = completed.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(error or "Windows folder picker failed.")
+            return completed.stdout.decode("utf-8", errors="replace").strip()
+
+        selected = await asyncio.to_thread(choose_directory)
+        return web.json_response({"ok": True, "path": os.path.normpath(selected) if selected else ""})
+    except Exception as e:
+        print(f"[SQR] directory picker error: {_sqr_format_exc(e)}")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@server.PromptServer.instance.routes.post("/sqr/compose_reference")
+async def sqr_compose_reference(request):
+    """Compose positioned reference cutouts onto a solid or uploaded background."""
+    try:
+        from PIL import Image, ImageOps
+
+        payload = await request.json()
+        width = max(64, min(4096, _sqr_to_int(payload.get("width"), 1024)))
+        height = max(64, min(4096, _sqr_to_int(payload.get("height"), 1024)))
+        layers = payload.get("layers", [])
+        if not isinstance(layers, list) or not layers:
+            raise ValueError("At least one person layer is required.")
+
+        background_mode = str(payload.get("background", "black")).lower()
+        colors = {
+            "black": (0, 0, 0, 255),
+            "white": (255, 255, 255, 255),
+            "gray": (128, 128, 128, 255),
+        }
+        background_path = _sqr_resolve_media_path(str(payload.get("background_image") or ""))
+        if background_mode == "image" and background_path and os.path.isfile(background_path):
+            with Image.open(background_path) as opened:
+                bg = ImageOps.exif_transpose(opened).convert("RGBA")
+            ratio = max(width / max(1, bg.width), height / max(1, bg.height))
+            resized = bg.resize(
+                (max(1, round(bg.width * ratio)), max(1, round(bg.height * ratio))),
+                Image.Resampling.LANCZOS,
+            )
+            left = (resized.width - width) // 2
+            top = (resized.height - height) // 2
+            canvas = resized.crop((left, top, left + width, top + height))
+        else:
+            canvas = Image.new("RGBA", (width, height), colors.get(background_mode, colors["black"]))
+
+        composed = 0
+        for raw in layers[:12]:
+            if not isinstance(raw, dict):
+                continue
+            cutout_mode = str(raw.get("cutout_mode") or "solid").lower()
+            selected_path = raw.get("sam3_cutout_path") if cutout_mode == "sam3" else raw.get("path")
+            path = _sqr_resolve_media_path(str(selected_path or raw.get("path") or ""))
+            if not path or not os.path.isfile(path):
+                continue
+            with Image.open(path) as opened:
+                layer = ImageOps.exif_transpose(opened).convert("RGBA")
+            if cutout_mode == "solid" and _sqr_to_bool(raw.get("remove_background", True), True):
+                layer = _sqr_remove_solid_background(layer, raw.get("threshold", 32), raw.get("feather", 18))
+            scale_value = max(0.05, min(5.0, float(raw.get("scale", 1.0))))
+            target_w = max(1, round(width * 0.35 * scale_value))
+            target_h = max(1, round(target_w * layer.height / max(1, layer.width)))
+            layer = layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            center_x = float(raw.get("x", 0.5)) * width
+            center_y = float(raw.get("y", 0.5)) * height
+            canvas.alpha_composite(layer, (round(center_x - target_w / 2), round(center_y - target_h / 2)))
+            composed += 1
+        if not composed:
+            raise ValueError("No valid person images were found.")
+
+        selected_directory = str(payload.get("save_directory") or "").strip()
+        if selected_directory and os.path.isabs(selected_directory) and os.path.isdir(selected_directory):
+            output_dir = os.path.realpath(selected_directory)
+            subfolder = ""
+        else:
+            requested_subfolder = str(payload.get("save_subfolder") or "sqr_composites").replace("\\", "/").strip("/")
+            safe_parts = []
+            for part in requested_subfolder.split("/"):
+                if not part or part in (".", ".."):
+                    continue
+                safe_part = "".join(ch for ch in part if ch.isalnum() or ch in (" ", "-", "_", ".")).strip(" .")
+                if safe_part:
+                    safe_parts.append(safe_part)
+            subfolder = "/".join(safe_parts) or "sqr_composites"
+            output_dir = os.path.join(folder_paths.get_input_directory(), subfolder)
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"sqr_composite_{_sqr_now_stamp()}.png"
+        saved_path = os.path.join(output_dir, filename)
+        canvas.convert("RGB").save(saved_path, "PNG")
+        result_path = os.path.normpath(saved_path) if selected_directory else f"{subfolder}/{filename}"
+        return web.json_response({
+            "ok": True,
+            "path": result_path,
+            "width": width,
+            "height": height,
+        })
+    except Exception as e:
+        print(f"[SQR] compose_reference error: {_sqr_format_exc(e)}")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 

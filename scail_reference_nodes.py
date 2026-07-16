@@ -119,6 +119,43 @@ def _render_grouped_colored_masks(track_data, background="black", groups_text=""
     return out
 
 
+def _render_reference_frame_grouped_colored_masks(track_data, background="black", groups_text=""):
+    packed = track_data["packed_masks"]
+    height, width = track_data["orig_size"]
+    device = comfy.model_management.intermediate_device()
+    dtype = comfy.model_management.intermediate_dtype()
+    bg_rgb = (1.0, 1.0, 1.0) if background.startswith("white") else (0.0, 0.0, 0.0)
+    if packed is None or packed.shape[1] == 0:
+        frames = track_data.get("n_frames", 1) if packed is None else packed.shape[0]
+        out = torch.empty(frames, height, width, 3, device=device, dtype=dtype)
+        out[..., 0], out[..., 1], out[..., 2] = bg_rgb[0], bg_rgb[1], bg_rgb[2]
+        return out
+
+    frames, n_obj = packed.shape[0], packed.shape[1]
+    masks_full = unpack_masks(packed.to(device)).float()
+    mask_h, mask_w = masks_full.shape[-2], masks_full.shape[-1]
+    masks_full = F.interpolate(
+        masks_full.view(frames * n_obj, 1, mask_h, mask_w),
+        size=(height, width),
+        mode="nearest",
+    ).view(frames, n_obj, height, width) > 0.5
+
+    groups = _parse_groups(groups_text, frames)
+    frame_to_color = {}
+    for color_index, group in enumerate(groups):
+        for frame_index in group:
+            frame_to_color[frame_index] = color_index
+
+    out = torch.empty(frames, height, width, 3, device=device, dtype=dtype)
+    out[..., 0], out[..., 1], out[..., 2] = bg_rgb[0], bg_rgb[1], bg_rgb[2]
+    for frame_index in range(frames):
+        group_mask = masks_full[frame_index].any(dim=0)
+        color_index = frame_to_color.get(frame_index, frame_index)
+        color = torch.tensor(DEFAULT_PALETTE[color_index % len(DEFAULT_PALETTE)], device=device, dtype=dtype)
+        out[frame_index] = torch.where(group_mask.unsqueeze(-1), color.view(1, 1, 3), out[frame_index])
+    return out
+
+
 def _resize_image(image, height, width):
     return F.interpolate(
         image.movedim(-1, 1),
@@ -388,12 +425,19 @@ class SQRScail2ColoredMaskAdvanced:
 
         if ref_track_data is not None:
             ref = _prep_track_data(ref_track_data, sort_by, object_indices)
-            reference_image_mask = _render_grouped_colored_masks(
-                ref,
-                ref_bg,
-                groups_text=ref_identity_groups,
-                force_single_identity=single_ref,
-            )
+            if identity_mode == "multi_person_multi_reference" and str(ref_identity_groups or "").strip():
+                reference_image_mask = _render_reference_frame_grouped_colored_masks(
+                    ref,
+                    ref_bg,
+                    groups_text=ref_identity_groups,
+                )
+            else:
+                reference_image_mask = _render_grouped_colored_masks(
+                    ref,
+                    ref_bg,
+                    groups_text=ref_identity_groups,
+                    force_single_identity=single_ref,
+                )
             bg_indices = []
             for item in str(background_indices or "").replace("|", ",").split(","):
                 item = item.strip()
