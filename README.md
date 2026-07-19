@@ -4,6 +4,24 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-19 — WAN ANI DIRECTOR Manual Recovery
+
+## Summary--
+Add a Director-specific, manually triggered recovery workflow that restores an interrupted segmented run without checking checkpoints during node or workflow loading.
+
+## Description--
+This update makes long Director/SCAIL-2 queues safer to resume while keeping normal workflow loading lightweight.
+
+- Added a `Resume` button beside Director Node Settings. Checkpoint detection runs only when this button is clicked.
+- Saved a complete Director snapshot after completed segments, including manual ranges, prompts, Character Lock data, ordered references, person/background identity metadata, SAM3 marks, Color Match settings, guide frames, and Load Video parameters.
+- Recorded real completed segment output paths, the next segment number, transition video, and transition latent state for continued execution and final merging.
+- Recovery restores available settings and assets, starts at the first unfinished segment, and includes previous completed outputs in the final merge.
+- Missing references, guide frames, SAM3 frames, transition media, or completed segment outputs are left empty and reported so they can be supplied manually.
+- A segment is considered recoverably complete only after its visible output file is found; incomplete output discovery keeps the checkpoint.
+- Multi Ref startup repair remains automatic where applicable: it repeats the first frame 9 times and trims the same 9 frames from the visible result. Transition-carry segments skip this repair to avoid duplicated seam motion.
+
+Restart ComfyUI and hard-refresh the browser after updating.
+
 ## Update 2026-JUL-16 — WAN ANI DIRECTOR Multi-Person SCAIL-2 Control
 
 ## Summary--

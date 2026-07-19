@@ -1474,6 +1474,15 @@ class SegmentQueueRunner:
                 continue
             if _node.get("class_type") in ("SQRScail2ColoredMaskAdvanced", "SQRSCAIL2TransitionToVideo"):
                 _node.setdefault("inputs", {})["replacement_mode"] = replacement_enabled
+            if _node.get("class_type") == "SQRSCAIL2TransitionToVideo":
+                # Director/SCAIL-2 segmented video execution is one timeline at
+                # a time. Some saved workflows may accidentally keep a sampler
+                # context/window value in this slot (for example 20), which
+                # would create a batched latent and make ComfyUI context-window
+                # conditioning index out of range. Normalize it before each
+                # queued segment is submitted; the transition node also keeps a
+                # runtime guard as a last-resort safety net.
+                _node.setdefault("inputs", {})["batch_size"] = 1
             if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
                 _inputs = _node.setdefault("inputs", {})
                 current_identity = _inputs.get("identity_mode")
@@ -1547,6 +1556,23 @@ class SegmentQueueRunner:
             ref_images_list = [x for group in ref_image_groups for x in group]
         elif ref_images_list:
             ref_images_list = _sqr_prepare_checkpoint_ref_entries(ref_images_list, unique_id=unique_id)
+
+        # Director-specific recovery snapshot. Reference paths are replaced by
+        # durable checkpoint copies while all newer Director metadata remains
+        # intact (prompts, ranges, SAM3, Character Lock, Color Match and IDs).
+        director_checkpoint_snapshot = None
+        if director_plan:
+            try:
+                director_checkpoint_snapshot = json.loads(director_data) if isinstance(director_data, str) else copy.deepcopy(director_data)
+                if isinstance(director_checkpoint_snapshot, dict):
+                    snapshot_segments = director_checkpoint_snapshot.get("segments", [])
+                    for snapshot_index, snapshot_segment in enumerate(snapshot_segments):
+                        if isinstance(snapshot_segment, dict) and snapshot_index < len(ref_image_groups):
+                            snapshot_segment["references"] = copy.deepcopy(ref_image_groups[snapshot_index])
+                    director_checkpoint_snapshot["checkpoint_version"] = 2
+            except Exception as exc:
+                print(f"[SQR] Director checkpoint snapshot failed: {exc}")
+                director_checkpoint_snapshot = None
 
         manual_video_path = manual_video_frames = None
         if resume_enabled and resume_video_path:
@@ -1687,6 +1713,8 @@ class SegmentQueueRunner:
                         continue
                     if _node.get("class_type") in ("SQRScail2ColoredMaskAdvanced", "SQRSCAIL2TransitionToVideo"):
                         _node.setdefault("inputs", {})["replacement_mode"] = seg_replacement
+                    if _node.get("class_type") == "SQRSCAIL2TransitionToVideo":
+                        _node.setdefault("inputs", {})["batch_size"] = 1
                     if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
                         _mask_inputs = _node.setdefault("inputs", {})
                         _mask_inputs["identity_mode"] = (
@@ -2314,6 +2342,21 @@ class SegmentQueueRunner:
                                 "transition_latent":      last_latent_name or "",
                                 "ref_images":             ref_images_list,
                                 "ref_image_groups":      ref_image_groups,
+                                "director_snapshot":      director_checkpoint_snapshot,
+                                "director_settings": {
+                                    "transition_enabled": transition_enabled,
+                                    "multi_ref_enabled": multi_ref_enabled,
+                                    "replacement_enabled": replacement_enabled,
+                                    "video_node_id": node_id,
+                                    "reference_node_id": ri_node_id,
+                                    "motion_node_id": ae_node_id,
+                                    "output_node_id": combine_nid,
+                                },
+                                "identity_groups":        [
+                                    _sqr_ref_identity_groups(group, max_refs=6)[0]
+                                    for group in ref_image_groups
+                                ],
+                                "segment_outputs":        list(segment_output_paths),
                                 "segments":               segments,
                                 "ref_video":              _ref_video_params.get("video", ""),
                                 "ref_video_params":       _ref_video_params,
@@ -2370,6 +2413,17 @@ class SegmentQueueRunner:
                         else:
                             log(f"  ⚠ 未找到完整视频，下段过渡将跳过")
                             last_video_path = last_video_frames = None
+
+                        # Update the record after discovering the real files.
+                        # This makes final merging recoverable as well as the
+                        # transition hand-off to the next unfinished segment.
+                        if unique_id and not _is_remote:
+                            _checkpoint = read_checkpoint(unique_id) or {}
+                            _checkpoint["segment_outputs"] = list(segment_output_paths)
+                            _checkpoint["transition_latent"] = last_latent_name or ""
+                            if last_video_path:
+                                _checkpoint["transition_video"] = os.path.basename(last_video_path)
+                            write_checkpoint(unique_id, _checkpoint)
                     else:
                         log(f"✗ 第{seg_num}段出错，终止。")
                         break
@@ -2448,6 +2502,11 @@ class SegmentQueueRunner:
                     pass
 
             _sqr_save_png = _sqr_to_bool(sqr_save_png, True)
+            # A segment is not recoverably complete until its visible output
+            # file has been found. Keep the Director checkpoint if discovery
+            # or final collection was incomplete.
+            if len(segment_output_paths) < len(segs_to_run) + len(pre_segment_paths):
+                _all_done = False
             _should_clean_main_png = not _sqr_save_png
             print(f"[SQR] Save png 设置: {sqr_save_png} → {'保留' if _sqr_save_png else '清理'}主节点 png")
 
@@ -2597,6 +2656,81 @@ async def sqr_get_checkpoint(request):
             ckpt["ref_video_match"]    = True
             ckpt["ref_video_mismatches"] = []
     return web.json_response({"checkpoint": ckpt})
+
+
+@server.PromptServer.instance.routes.get("/sqr/director_checkpoint")
+async def sqr_get_director_checkpoint(request):
+    """Manual-only Director recovery probe used by its Resume button."""
+    uid = request.rel_url.query.get("uid", "")
+    ckpt = read_checkpoint(uid) if uid else None
+    if not isinstance(ckpt, dict) or not isinstance(ckpt.get("director_snapshot"), dict):
+        return web.json_response({"checkpoint": None})
+
+    snapshot = copy.deepcopy(ckpt["director_snapshot"])
+    missing = []
+    segments_data = snapshot.get("segments", []) if isinstance(snapshot, dict) else []
+    for seg_index, segment in enumerate(segments_data, start=1):
+        if not isinstance(segment, dict):
+            continue
+        available_refs = []
+        for ref_index, entry in enumerate(segment.get("references", []) or [], start=1):
+            path = _sqr_ref_entry_path(entry)
+            resolved = _sqr_resolve_media_path(path)
+            if resolved and os.path.isfile(resolved):
+                restored = copy.deepcopy(entry)
+                if isinstance(restored, dict):
+                    restored["path"] = resolved
+                else:
+                    restored = resolved
+                available_refs.append(restored)
+            else:
+                missing.append(f"segment {seg_index} reference {ref_index}")
+        segment["references"] = available_refs
+
+        guide = segment.get("guide_frame")
+        guide_path = _sqr_ref_entry_path(guide)
+        if guide_path:
+            resolved = _sqr_resolve_media_path(guide_path)
+            if resolved and os.path.isfile(resolved):
+                if isinstance(guide, dict):
+                    guide["path"] = resolved
+            else:
+                segment["guide_frame"] = None
+                missing.append(f"segment {seg_index} guide frame")
+
+        marking = segment.get("sam3_marking")
+        if isinstance(marking, dict) and marking.get("frame_path"):
+            resolved = _sqr_resolve_media_path(marking.get("frame_path"))
+            if resolved and os.path.isfile(resolved):
+                marking["frame_path"] = resolved
+            else:
+                marking["frame_path"] = ""
+                missing.append(f"segment {seg_index} SAM3 frame")
+
+    outputs = []
+    for index, raw_path in enumerate(ckpt.get("segment_outputs", []) or [], start=1):
+        resolved = _sqr_resolve_media_path(raw_path)
+        if resolved and os.path.isfile(resolved):
+            outputs.append(resolved)
+        else:
+            missing.append(f"completed segment output {index}")
+
+    transition = _sqr_resolve_media_path(ckpt.get("transition_video", ""))
+    if not transition or not os.path.isfile(transition):
+        transition = ""
+        missing.append("resume transition video")
+
+    source_video = _sqr_resolve_media_path(ckpt.get("ref_video", ""))
+    if ckpt.get("ref_video") and (not source_video or not os.path.isfile(source_video)):
+        missing.append("reference video")
+
+    result = copy.deepcopy(ckpt)
+    result["director_snapshot"] = snapshot
+    result["segment_outputs"] = outputs
+    result["transition_video"] = transition
+    result["source_video"] = source_video if source_video and os.path.isfile(source_video) else ""
+    result["missing"] = missing
+    return web.json_response({"checkpoint": result})
 
 
 def _sqr_safe_upload_name(input_dir: str, original: str, default_ext: str) -> str:
@@ -3114,6 +3248,12 @@ async def sqr_compose_reference(request):
             target_w = max(1, round(width * 0.35 * scale_value))
             target_h = max(1, round(target_w * layer.height / max(1, layer.width)))
             layer = layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            if _sqr_to_bool(raw.get("flip_horizontal", False), False):
+                layer = ImageOps.mirror(layer)
+            rotation = max(-180.0, min(180.0, float(raw.get("rotation", 0.0))))
+            if abs(rotation) > 0.001:
+                layer = layer.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=True)
+            target_w, target_h = layer.size
             center_x = float(raw.get("x", 0.5)) * width
             center_y = float(raw.get("y", 0.5)) * height
             canvas.alpha_composite(layer, (round(center_x - target_w / 2), round(center_y - target_h / 2)))
