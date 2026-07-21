@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import "./lh_image_detail_editor.js";
 
 const NODE_NAME = "LHImageEditor";
 

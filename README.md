@@ -4,6 +4,23 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-21 — LH Image Editor and Portable Queue Reconnection
+
+## Summary--
+Add a standalone, reusable reference-image compositor with local cutout refinement and non-destructive color controls, and make segmented queues reconnect to the actual ComfyUI listen address and port.
+
+## Description--
+
+- Added the standalone `LH Image Editor` while keeping the compositor available inside Director.
+- Added multi-person composition over solid or uploaded backgrounds, native-resolution layer handling, positioning, scaling, horizontal flip, center rotation, and selectable output directories.
+- Added fast solid-color cutout, optional SAM3 cutout, and a hard/soft person eraser with an adjustable brush size. Newly loaded person images now default to `No cutout`.
+- Added non-destructive light, color, and detail controls, including exposure, tonal ranges, white balance, saturation, texture, clarity, sharpening, denoise, and blur.
+- Added editable master and RGB curves with control-point creation, dragging, right-click deletion, per-channel reset, a 15-step undo history, and a draggable before/after comparison.
+- Lightweight previews are capped in resolution while final adjustments are applied to the original-resolution image during composition.
+- Fixed background segmented-queue submission on installations using custom ComfyUI ports or listen addresses by reading the active ComfyUI CLI server settings before falling back to common local ports.
+
+Restart ComfyUI and hard-refresh the browser after updating.
+
 ## Update 2026-JUL-19 — WAN ANI DIRECTOR Manual Recovery
 
 ## Summary--

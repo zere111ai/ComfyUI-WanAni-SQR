@@ -5,6 +5,7 @@ ComfyUI 分段自动队列节点 - 最终版
 import math, copy, json, time, os, threading, urllib.request, urllib.error, hashlib, socket
 import server, folder_paths
 from aiohttp import web
+from comfy.cli_args import args
 
 # ── 日志缓冲（前端弹窗读取）──────────────────────────────────────
 _sqr_log_buf: dict = {}
@@ -560,6 +561,10 @@ def _sqr_collect_comfy_hosts() -> list[str]:
         if srv is not None:
             add(getattr(srv, "address", None), getattr(srv, "port", None))
             add(getattr(srv, "host", None), getattr(srv, "port", None))
+
+    add(getattr(args, "listen", None), getattr(args, "port", None))
+    add("127.0.0.1", getattr(args, "port", None))
+    add("localhost", getattr(args, "port", None))
 
     add(os.environ.get("COMFYUI_HOST"), os.environ.get("COMFYUI_PORT"))
     add(os.environ.get("SERVER_HOST"), os.environ.get("SERVER_PORT"))
@@ -3058,6 +3063,84 @@ def _sqr_remove_solid_background(image, threshold=32, feather=18):
     return Image.fromarray(np.clip(array, 0, 255).astype(np.uint8), "RGBA")
 
 
+def _sqr_adjust_layer_details(image, raw):
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    alpha = image.getchannel("A")
+    pixels = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    legacy_brightness = max(0.5, min(1.5, float(raw.get("detail_brightness", 1.0))))
+    exposure = max(-3.0, min(3.0, float(raw.get("detail_exposure", math.log2(legacy_brightness)))))
+    contrast = max(0.5, min(1.5, float(raw.get("detail_contrast", 1.0))))
+    highlights = max(-1.0, min(1.0, float(raw.get("detail_highlights", 0.0))))
+    shadows = max(-1.0, min(1.0, float(raw.get("detail_shadows", 0.0))))
+    whites = max(-1.0, min(1.0, float(raw.get("detail_whites", 0.0))))
+    blacks = max(-1.0, min(1.0, float(raw.get("detail_blacks", 0.0))))
+    temperature = max(-100.0, min(100.0, float(raw.get("detail_temperature", 0.0))))
+    tint = max(-100.0, min(100.0, float(raw.get("detail_tint", 0.0))))
+    hue = max(-180.0, min(180.0, float(raw.get("detail_hue", 0.0))))
+    saturation = max(0.0, min(2.0, float(raw.get("detail_saturation", 1.0))))
+    vibrance = max(-1.0, min(1.0, float(raw.get("detail_vibrance", 0.0))))
+    texture = max(-1.0, min(1.0, float(raw.get("detail_texture", 0.0))))
+    clarity = max(-1.0, min(1.0, float(raw.get("detail_clarity", 0.0))))
+    sharpness = max(0.0, min(3.0, float(raw.get("detail_sharpness", 1.0))))
+    denoise = max(0.0, min(1.0, float(raw.get("detail_denoise", 0.0))))
+    blur = max(0.0, min(20.0, float(raw.get("detail_blur", 0.0))))
+
+    pixels *= 2.0 ** exposure
+    luminance = np.mean(pixels, axis=2, keepdims=True)
+    pixels += highlights * np.square(np.clip(luminance, 0.0, 1.0)) * 0.35
+    pixels += shadows * np.square(1.0 - np.clip(luminance, 0.0, 1.0)) * 0.35
+    pixels += whites * np.power(np.clip(luminance, 0.0, 1.0), 4.0) * 0.3
+    pixels += blacks * np.power(1.0 - np.clip(luminance, 0.0, 1.0), 4.0) * 0.3
+    pixels = (pixels - 0.5) * contrast + 0.5
+    if abs(temperature) > 0.001:
+        shift = temperature / 100.0
+        pixels[:, :, 0] *= 1.0 + 0.25 * shift
+        pixels[:, :, 2] *= 1.0 - 0.25 * shift
+    if abs(tint) > 0.001:
+        shift = tint / 100.0
+        pixels[:, :, 0] *= 1.0 + 0.08 * shift
+        pixels[:, :, 1] *= 1.0 - 0.16 * shift
+        pixels[:, :, 2] *= 1.0 + 0.08 * shift
+    rgb8 = np.clip(pixels * 255.0, 0, 255).astype(np.uint8)
+    hsv = cv2.cvtColor(rgb8, cv2.COLOR_RGB2HSV).astype(np.float32)
+    hsv[:, :, 0] = (hsv[:, :, 0] + hue / 2.0) % 180.0
+    current_saturation = hsv[:, :, 1] / 255.0
+    vibrance_gain = 1.0 + vibrance * (1.0 - current_saturation)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation * vibrance_gain, 0, 255)
+    rgb8 = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+    for name, channels in (("y", (0, 1, 2)), ("r", (0,)), ("g", (1,)), ("b", (2,))):
+        points = raw.get(f"detail_curve_{name}", [[0.0, 0.0], [1.0, 1.0]])
+        if not isinstance(points, list) or len(points) < 2:
+            continue
+        clean = sorted((max(0.0, min(1.0, float(point[0]))), max(0.0, min(1.0, float(point[1])))) for point in points if isinstance(point, (list, tuple)) and len(point) >= 2)
+        if len(clean) < 2:
+            continue
+        lut = np.interp(np.arange(256) / 255.0, [point[0] for point in clean], [point[1] for point in clean])
+        lut = np.clip(lut * 255.0, 0, 255).astype(np.uint8)
+        for channel in channels:
+            rgb8[:, :, channel] = lut[rgb8[:, :, channel]]
+    if abs(texture) > 0.001:
+        fine = rgb8.astype(np.float32) - cv2.GaussianBlur(rgb8, (0, 0), 1.2).astype(np.float32)
+        rgb8 = np.clip(rgb8.astype(np.float32) + fine * texture, 0, 255).astype(np.uint8)
+    if abs(clarity) > 0.001:
+        local = rgb8.astype(np.float32) - cv2.GaussianBlur(rgb8, (0, 0), 8.0).astype(np.float32)
+        rgb8 = np.clip(rgb8.astype(np.float32) + local * clarity * 0.7, 0, 255).astype(np.uint8)
+    if denoise > 0.001:
+        strength = max(1, round(denoise * 12))
+        rgb8 = cv2.fastNlMeansDenoisingColored(rgb8, None, strength, strength, 7, 21)
+    if blur > 0.001:
+        rgb8 = cv2.GaussianBlur(rgb8, (0, 0), max(0.1, blur))
+    if abs(sharpness - 1.0) > 0.001:
+        soft = cv2.GaussianBlur(rgb8, (0, 0), 1.0)
+        rgb8 = np.clip(rgb8.astype(np.float32) + (rgb8.astype(np.float32) - soft.astype(np.float32)) * (sharpness - 1.0), 0, 255).astype(np.uint8)
+    rgb = Image.fromarray(rgb8, "RGB")
+    rgb.putalpha(alpha)
+    return rgb
+
+
 _sqr_sam3_segment_instance = None
 _sqr_sam3_segment_lock = threading.Lock()
 
@@ -3244,6 +3327,7 @@ async def sqr_compose_reference(request):
                 layer = ImageOps.exif_transpose(opened).convert("RGBA")
             if cutout_mode == "solid" and _sqr_to_bool(raw.get("remove_background", True), True):
                 layer = _sqr_remove_solid_background(layer, raw.get("threshold", 32), raw.get("feather", 18))
+            layer = _sqr_adjust_layer_details(layer, raw)
             scale_value = max(0.05, min(5.0, float(raw.get("scale", 1.0))))
             target_w = max(1, round(width * 0.35 * scale_value))
             target_h = max(1, round(target_w * layer.height / max(1, layer.width)))
