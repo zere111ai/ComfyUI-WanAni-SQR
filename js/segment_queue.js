@@ -350,7 +350,18 @@ return new Promise(resolve => {
     const btns=document.createElement("div"); btns.style.cssText="display:flex;gap:8px;margin-top:4px;";
     const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
     btns.append(
-        mkBtn("Disable Resume","background:rgba(180,60,60,0.2);border:1px solid rgba(200,80,80,0.5);color:#f88;",()=>{ sqrNode._sqrClearVideo?.(); overlay.remove(); resolve({ cancelResume: true }); }),
+        mkBtn("Disable Resume","background:rgba(180,60,60,0.2);border:1px solid rgba(200,80,80,0.5);color:#f88;",()=>{
+            sqrNode._sqrClearVideo?.();
+            const setWidget = (name, value) => { const widget = sqrNode.widgets?.find(w => w.name === name); if (widget) widget.value = value; };
+            setWidget("启用续跑", false);
+            setWidget("续跑视频路径", "");
+            setWidget("从第几段开始", 1);
+            setWidget("sqr_frame_offset", -1);
+            setWidget("sqr_pre_segments", "");
+            sqrNode.setDirtyCanvas?.(true, true);
+            overlay.remove();
+            resolve({ cancelResume: true });
+        }),
         mkBtn("Skip, Merge Current Only","",()=>{ overlay.remove(); resolve([]); }),
         mkBtn("Run","background:#2a9;color:#fff;border:none;font-weight:700;",()=>{ overlay.remove(); resolve(selPaths); })
     );

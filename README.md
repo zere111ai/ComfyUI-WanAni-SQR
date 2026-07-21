@@ -4,6 +4,16 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-22 — Director Resume State Reset
+
+## Summary--
+Fix WAN ANI DIRECTOR fresh-run execution after disabling a previously loaded resume session.
+
+## Description--
+`Disable Resume` now clears the complete hidden recovery state for both WAN ANI DIRECTOR and the legacy segment queue, including the resume toggle, transition-video path, start segment, frame offset, and previous segment-output list. A new two-segment task therefore starts from segment 1 instead of silently retaining an earlier `start from segment 2` value.
+
+Restart ComfyUI and hard-refresh the browser after updating.
+
 ## Update 2026-JUL-21 — LH Image Editor and Portable Queue Reconnection
 
 ## Summary--
