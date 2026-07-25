@@ -837,32 +837,40 @@ def find_driving_sam3_node(prompt: dict, video_node_id: str) -> str | None:
     return fallback
 
 
-def media_has_audio(path: str | None) -> bool:
-    """Return True only when the media file contains at least one audio stream."""
-    if not path or not os.path.isfile(path):
-        return False
-    import shutil
-    import subprocess
-
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return False
-    ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if os.name == "nt" else "ffprobe")
-    if not os.path.isfile(ffprobe):
-        ffprobe = shutil.which("ffprobe")
-    try:
-        if ffprobe:
+    def media_has_audio(self, media_path):
+        """检查媒体文件是否包含音频流"""
+        if not os.path.exists(media_path):
+            return False
+        
+        # 优先使用系统 PATH 中的 ffmpeg
+        try:
             result = subprocess.run(
-                [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+                ["ffmpeg", "-i", media_path],
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,
+                timeout=5
             )
-            return result.returncode == 0 and bool(result.stdout.strip())
-        result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=20,
-        )
-        return "Audio:" in (result.stderr or "")
-    except Exception:
+            output = result.stdout.decode('utf-8', errors='ignore')
+            return "Audio:" in output or "audio:" in output
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+            
+        # 如果 PATH 中没有，尝试查找 imageio_ffmpeg 自带的 ffmpeg
+        try:
+            import imageio_ffmpeg
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+            if os.path.exists(ffmpeg_path):
+                result = subprocess.run(
+                    [ffmpeg_path, "-i", media_path],
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT,
+                    timeout=5
+                )
+                output = result.stdout.decode('utf-8', errors='ignore')
+                return "Audio:" in output or "audio:" in output
+        except Exception:
+            pass
+            
         return False
 
 
