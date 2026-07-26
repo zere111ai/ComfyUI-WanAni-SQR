@@ -2579,9 +2579,17 @@ class WanAniDirector(SegmentQueueRunner):
             "default": "{}",
             "tooltip": "JSON state for the WAN ANI DIRECTOR UI."
         })
+        data.setdefault("optional", {})
+        data["optional"]["director_json_input"] = ("STRING", {
+            "default": "",
+            "forceInput": True,
+            "tooltip": "Optional external JSON that overrides director_data (for API/programmatic driving). Wire a string node here; when non-empty it replaces the UI timeline state."
+        })
         return data
 
-    def run(self, *args, director_data="{}", **kwargs):
+    def run(self, *args, director_data="{}", director_json_input="", **kwargs):
+        if isinstance(director_json_input, str) and director_json_input.strip():
+            director_data = director_json_input
         resolved = resolve_director_composed_prompts(director_data)
         guide_frame = load_first_director_guide_frame(director_data)
         super().run(*args, director_data=director_data, **kwargs)
