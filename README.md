@@ -4,6 +4,25 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-27 — LH Video Cutter and Image Editing Controls
+
+## Summary--
+Add a standalone frame-accurate video cutter with scene detection, synchronized audio waveforms, selective video/audio export, and portable JSON task snapshots; expand the shared LH Image Editor and Director compositor with practical layer controls and a scrollable tool panel.
+
+## Description--
+
+- Added `LH Video Cutter`, combining automatic scene-cut detection with manual frame-accurate cuts, a full-video frame/time ruler, a synchronized playhead, per-segment highlighting, and selectable segment cards.
+- Added exact frame/time navigation, previous/next cut navigation, one-frame cut nudging, timeline zoom and panning, optional cut snapping, per-segment playback pause/loop modes, and keyboard shortcuts for playback, cutting, navigation, deletion, undo, and redo.
+- Added a ten-step edit history, segment naming, per-segment export selection, selected-segment-only export, and accurate H.264 or fast stream-copy output.
+- Added a lightweight FFmpeg-generated audio waveform synchronized with the timeline, cuts, zoom, segment colors, and playhead.
+- Added optional standalone audio slices in MP3 (96/128/192/256/320 kbps) or uncompressed WAV, using the same ranges and names as the video segments.
+- Added portable `.json` cutter task snapshots with custom directories and filenames. Snapshots restore the target video, cuts, names, export choices, timeline position, playback controls, audio settings, and output settings, while rejecting moved or mismatched target-video paths.
+- Expanded the shared `LH Image Editor` and Director image compositor with layer opacity, ordering, duplication, edge/center alignment, vertical flip, 90-degree rotation, solid-key feathering, custom-color backgrounds, transparent PNG backgrounds, and capped-resolution previews with full-resolution final output.
+- Fixed live preview behavior for Highlights, Shadows, Whites, and Blacks so tonal controls match the final backend composition more closely.
+- Added an independent vertical scrollbar to the Director image-compositor tool panel so all controls and save actions remain accessible on smaller screens.
+
+Restart ComfyUI and hard-refresh the browser after updating.
+
 ## Update 2026-JUL-22 — Director Resume State Reset
 
 ## Summary--
@@ -228,6 +247,9 @@ transition plugin enabled at the same time can register duplicate node names.
 - Auto Merge: Automatically combine clips into a complete video
 - Audio Sync: Auto-extract and align audio from source video
 - Preview Mode: Check segment plan before rendering
+- WAN ANI DIRECTOR: Frame-accurate segmented references, prompts, identity control, Color Match, SAM3 assistance, and manual recovery
+- LH Image Editor: Multi-layer reference compositing, cutout tools, curves, tonal controls, alignment, transparency, and full-resolution export
+- LH Video Cutter: Manual and detected cuts, waveform timeline, shortcuts, selective video/audio export, and portable JSON task snapshots
 
 ## 📦 Installation
 cd ComfyUI/custom_nodes

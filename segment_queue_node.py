@@ -3240,7 +3240,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $owner = New-Object System.Windows.Forms.Form
-$owner.Text = 'LH Image Editor'
+$owner.Text = 'Select Save Folder'
 $owner.Size = New-Object System.Drawing.Size(1, 1)
 $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $owner.ShowInTaskbar = $false
@@ -3249,9 +3249,10 @@ $owner.Opacity = 0.01
 $owner.Show()
 $owner.Activate()
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = 'Select LH Image Editor save folder'
+$dialog.Description = 'Select save folder'
 $dialog.SelectedPath = '{initial}'
 $dialog.ShowNewFolderButton = $true
+$dialog.AutoUpgradeEnabled = $true
 try {{
     if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {{
         [Console]::Out.Write($dialog.SelectedPath)
@@ -3298,7 +3299,17 @@ async def sqr_compose_reference(request):
             "black": (0, 0, 0, 255),
             "white": (255, 255, 255, 255),
             "gray": (128, 128, 128, 255),
+            "transparent": (0, 0, 0, 0),
         }
+        if background_mode == "custom":
+            color = str(payload.get("background_color") or "#202020").lstrip("#")
+            if len(color) == 6:
+                try:
+                    colors["custom"] = (*tuple(int(color[i:i + 2], 16) for i in (0, 2, 4)), 255)
+                except ValueError:
+                    colors["custom"] = (32, 32, 32, 255)
+            else:
+                colors["custom"] = (32, 32, 32, 255)
         background_path = _sqr_resolve_media_path(str(payload.get("background_image") or ""))
         if background_mode == "image" and background_path and os.path.isfile(background_path):
             with Image.open(background_path) as opened:
@@ -3334,9 +3345,14 @@ async def sqr_compose_reference(request):
             layer = layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
             if _sqr_to_bool(raw.get("flip_horizontal", False), False):
                 layer = ImageOps.mirror(layer)
+            if _sqr_to_bool(raw.get("flip_vertical", False), False):
+                layer = ImageOps.flip(layer)
             rotation = max(-180.0, min(180.0, float(raw.get("rotation", 0.0))))
             if abs(rotation) > 0.001:
                 layer = layer.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=True)
+            opacity = max(0.0, min(1.0, float(raw.get("opacity", 1.0))))
+            if opacity < 1.0:
+                layer.putalpha(layer.getchannel("A").point(lambda value: round(value * opacity)))
             target_w, target_h = layer.size
             center_x = float(raw.get("x", 0.5)) * width
             center_y = float(raw.get("y", 0.5)) * height
@@ -3363,7 +3379,7 @@ async def sqr_compose_reference(request):
         os.makedirs(output_dir, exist_ok=True)
         filename = f"sqr_composite_{_sqr_now_stamp()}.png"
         saved_path = os.path.join(output_dir, filename)
-        canvas.convert("RGB").save(saved_path, "PNG")
+        (canvas if background_mode == "transparent" else canvas.convert("RGB")).save(saved_path, "PNG")
         result_path = os.path.normpath(saved_path) if selected_directory else f"{subfolder}/{filename}"
         return web.json_response({
             "ok": True,

@@ -92,9 +92,30 @@ window.LHImageDetailEditor = async function ({ layer, source, lang = "zh", onApp
             frame = 0;
             const output = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
             const master = lutFor("y"), red = lutFor("r"), green = lutFor("g"), blue = lutFor("b");
-            for (let i = 0; i < output.data.length; i += 4) { output.data[i] = red[master[output.data[i]]]; output.data[i + 1] = green[master[output.data[i + 1]]]; output.data[i + 2] = blue[master[output.data[i + 2]]] }
+            const exposure = Math.pow(2, draft.exposure);
+            const temperature = draft.temperature / 100;
+            const tint = draft.tint / 100;
+            for (let i = 0; i < output.data.length; i += 4) {
+                let r = base.data[i] / 255 * exposure;
+                let g = base.data[i + 1] / 255 * exposure;
+                let b = base.data[i + 2] / 255 * exposure;
+                const luminance = clamp((r + g + b) / 3, 0, 1);
+                const tone = draft.highlights * luminance * luminance * .35
+                    + draft.shadows * (1 - luminance) * (1 - luminance) * .35
+                    + draft.whites * Math.pow(luminance, 4) * .3
+                    + draft.blacks * Math.pow(1 - luminance, 4) * .3;
+                r = (r + tone - .5) * draft.contrast + .5;
+                g = (g + tone - .5) * draft.contrast + .5;
+                b = (b + tone - .5) * draft.contrast + .5;
+                r *= 1 + .25 * temperature + .08 * tint;
+                g *= 1 - .16 * tint;
+                b *= 1 - .25 * temperature + .08 * tint;
+                output.data[i] = red[master[Math.round(clamp(r, 0, 1) * 255)]];
+                output.data[i + 1] = green[master[Math.round(clamp(g, 0, 1) * 255)]];
+                output.data[i + 2] = blue[master[Math.round(clamp(b, 0, 1) * 255)]];
+            }
             actx.putImageData(output, 0, 0);
-            after.style.filter = `brightness(${Math.max(.1, Math.pow(2, draft.exposure))}) contrast(${draft.contrast * (1 + draft.clarity * .18)}) saturate(${Math.max(0, draft.saturation * (1 + draft.vibrance * .35))}) hue-rotate(${draft.hue}deg) blur(${draft.blur * .25}px)`;
+            after.style.filter = `contrast(${Math.max(.1, 1 + draft.clarity * .18)}) saturate(${Math.max(0, draft.saturation * (1 + draft.vibrance * .35))}) hue-rotate(${draft.hue}deg) blur(${draft.blur * .25}px)`;
             for (const [key] of controls) { editor.querySelector(`[data-detail="${key}"]`).value = draft[key]; editor.querySelector(`[data-value="${key}"]`).textContent = Number(draft[key]).toFixed(["temperature", "tint", "hue"].includes(key) ? 0 : 2) }
             drawCurve();
         });
