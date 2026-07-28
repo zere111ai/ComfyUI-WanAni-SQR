@@ -4,6 +4,23 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-28 — Native File Loading, Person Editing, and Director Timing
+
+## Summary--
+Unify local file loading around the native file chooser, add person-selective SAM3 cutouts and editable character shadows, and preserve full video duration when Director output uses frame interpolation.
+
+## Description--
+
+- Replaced the plugin's custom folder-browser dialogs with the native browser/operating-system file chooser for video loading, cutter project loading, reference-image loading, and resume-clip selection. Selected media is uploaded into ComfyUI input storage when required, while multi-clip recovery keeps drag reordering and removal.
+- Updated `LH Video Cutter` task loading to accept a directly selected `.json` file while retaining strict source-video path validation.
+- Added per-person switching in the shared `LH Image Editor` and Director compositor so each character can be selected and edited independently.
+- Added editable drop shadows and ground projections per person, including color, opacity, blur, offsets, width, ground compression, and angle. The saved full-resolution composition now matches the preview controls.
+- Added positive/negative point tagging to SAM3 image cutout mode. Candidate masks are scored against the green include points and red exclude points to select the intended person in multi-person images.
+- Fixed image composition saving when shadow or mask blur processing is used by loading the required Pillow image-filter implementation.
+- Fixed Director output timing when `FrameInterpolate` is connected before `Video Combine`. Director now crops each segment on the source-frame timeline first and interpolates the complete cropped segment afterward; hidden transition handoff video remains at the source frame rate. For example, 331 frames at 18 FPS now become approximately 661 frames at 36 FPS instead of a 331-frame, 9.2-second result.
+
+Restart ComfyUI and hard-refresh the browser after updating.
+
 ## Update 2026-JUL-27 — LH Video Cutter and Image Editing Controls
 
 ## Summary--

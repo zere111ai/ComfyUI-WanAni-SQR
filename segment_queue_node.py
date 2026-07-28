@@ -1638,11 +1638,19 @@ class SegmentQueueRunner:
             _sqr_log(unique_id, f"[SQR] Load Video 原始 skip_first_frames={main_ref_skip_first}，分段读取会保留这个起始偏移")
 
         image_src_node = None
+        frame_interpolate_nid = None
         latent_src_node = None
         if vc_nid and vc_nid in base_prompt:
             img_input = base_prompt[vc_nid]["inputs"].get("images")
             if isinstance(img_input, list) and len(img_input) == 2:
                 image_src_node = img_input
+                output_node = base_prompt.get(str(img_input[0]), {})
+                if output_node.get("class_type") == "FrameInterpolate":
+                    interpolation_input = output_node.get("inputs", {}).get("images")
+                    if isinstance(interpolation_input, list) and len(interpolation_input) == 2:
+                        frame_interpolate_nid = str(img_input[0])
+                        image_src_node = interpolation_input
+                        print(f"[SQR] 帧插值输出: {img_input}，原始图像来源: {image_src_node}")
                 print(f"[SQR] 图像来源: {image_src_node}")
                 latent_src_node = find_latent_source_for_images(base_prompt, image_src_node)
                 if latent_src_node:
@@ -2176,10 +2184,16 @@ class SegmentQueueRunner:
                     log(f"  Director 精确裁切：Wan窗口{limit}帧 → 时间线{visible_limit}帧")
 
                 if vc_nid and vc_nid in wf:
+                    final_output_image_node = [final_image_node, 0]
+                    if frame_interpolate_nid and frame_interpolate_nid in wf:
+                        wf[frame_interpolate_nid]["inputs"]["images"] = final_output_image_node
+                        final_output_image_node = [frame_interpolate_nid, 0]
+                        log("  帧插值：先按源视频帧数裁切，再对完整分段插帧")
+
                     # Keep the user's existing Video Combine node as the live
                     # per-segment preview target. The hidden full/cut clones are
                     # still used for transition handoff and reliable file lookup.
-                    wf[vc_nid]["inputs"]["images"] = [final_image_node, 0]
+                    wf[vc_nid]["inputs"]["images"] = final_output_image_node
 
                     full_image_node = image_src
                     if startup_trim_frames > 0:
@@ -2199,12 +2213,14 @@ class SegmentQueueRunner:
                     full_vc_id = f"sqr_full_vc_{seg_num}"
                     full_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
                     full_inputs["images"] = full_image_node
+                    if frame_interpolate_nid:
+                        full_inputs["frame_rate"] = frame_rate
                     full_inputs["save_output"] = True
                     full_inputs["save_metadata"] = False
 
                     cut_vc_id = f"sqr_cut_vc_{seg_num}"
                     cut_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
-                    cut_inputs["images"]          = [final_image_node, 0]
+                    cut_inputs["images"]          = final_output_image_node
                     cut_inputs["save_output"]     = True
                     cut_inputs["save_metadata"]   = False
                     _main_prefix = wf[vc_nid]["inputs"].get("filename_prefix", "")
@@ -2939,68 +2955,6 @@ async def sqr_video_info(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
-@server.PromptServer.instance.routes.get("/sqr/browse_videos")
-async def sqr_browse_videos(request):
-    import re
-    vid_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-    def nat_key(s):
-        return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
-    def sort_key(fname):
-        m = re.match(r"sqr_trans_[0-9_]+_seg(\d+)\.mp4$", fname, re.IGNORECASE) or re.match(r"sqr_trans_[a-f0-9]+_seg(\d+)\.mp4$", fname, re.IGNORECASE)
-        if m:
-            return (0, int(m.group(1)), fname)
-        m = re.match(r"segment_transition_seg(\d+)\.mp4$", fname, re.IGNORECASE)
-        if m:
-            return (0, int(m.group(1)), fname)
-        parts = re.split(r"(\d+)", fname)
-        return (1, 0, tuple(int(p) if p.isdigit() else p.lower() for p in parts))
-    req_path = request.rel_url.query.get("path", "").strip()
-    import platform, string as _str
-    if req_path == "__drives__":
-        drives = []
-        if platform.system() == "Windows":
-            for d in _str.ascii_uppercase:
-                dp = d + ":\\"
-                if os.path.exists(dp):
-                    drives.append({"label": dp, "path": dp, "is_drive": True})
-        else:
-            drives.append({"label": "/", "path": "/", "is_drive": True})
-        return web.json_response({"type": "roots", "roots": drives})
-    if not req_path:
-        starts = []
-        for label, p in [("ComfyUI input", folder_paths.get_input_directory()),
-                         ("ComfyUI output", folder_paths.get_output_directory())]:
-            if os.path.isdir(p):
-                starts.append({"label": label, "path": p})
-        starts.append({"label": "此电脑", "path": "__drives__", "is_virtual": True})
-        home = os.path.expanduser("~")
-        for sub in ["Desktop", "桌面", "Videos", "视频", "Downloads", "下载"]:
-            p = os.path.join(home, sub)
-            if os.path.isdir(p):
-                starts.append({"label": sub, "path": p})
-        return web.json_response({"type": "roots", "roots": starts})
-    req_path = os.path.realpath(req_path)
-    if not os.path.isdir(req_path):
-        return web.json_response({"error": "路径不存在"}, status=400)
-    try:
-        entries = os.listdir(req_path)
-    except PermissionError:
-        return web.json_response({"error": "无权限访问"}, status=403)
-    folders = sorted([e for e in entries
-                      if os.path.isdir(os.path.join(req_path, e))
-                      and not e.startswith(".")], key=nat_key)
-    videos  = sorted([e for e in entries
-                      if os.path.splitext(e)[1].lower() in vid_exts], key=sort_key)
-    parent  = os.path.dirname(req_path) if req_path != os.path.dirname(req_path) else None
-    return web.json_response({
-        "type":    "dir",
-        "path":    req_path,
-        "parent":  parent,
-        "folders": folders,
-        "videos":  videos,
-    })
-
-
 @server.PromptServer.instance.routes.get("/sqr/image_thumb")
 async def sqr_image_thumb(request):
     fname = request.rel_url.query.get("file", "")
@@ -3152,7 +3106,7 @@ async def sqr_sam3_cutout(request):
         import nodes
         import numpy as np
         import torch
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageFilter, ImageOps
 
         payload = await request.json()
         source_path = _sqr_resolve_media_path(str(payload.get("image") or ""))
@@ -3162,6 +3116,10 @@ async def sqr_sam3_cutout(request):
         confidence = max(0.05, min(0.95, float(payload.get("confidence", 0.5))))
         mask_blur = max(0, min(64, _sqr_to_int(payload.get("mask_blur"), 2)))
         mask_offset = max(-64, min(64, _sqr_to_int(payload.get("mask_offset"), 0)))
+        positive_points = payload.get("positive_points", [])
+        negative_points = payload.get("negative_points", [])
+        positive_points = positive_points if isinstance(positive_points, list) else []
+        negative_points = negative_points if isinstance(negative_points, list) else []
 
         node_class = nodes.NODE_CLASS_MAPPINGS.get("SAM3Segment")
         if node_class is None:
@@ -3185,11 +3143,37 @@ async def sqr_sam3_cutout(request):
                 unload_model=False,
                 background="Alpha",
                 background_color="#000000",
-                output_mode="Merged",
+                output_mode="Separate" if positive_points else "Merged",
             )
         if masks is None or masks.numel() == 0:
             raise RuntimeError("SAM3 did not return a mask for this prompt.")
-        mask = masks[0].detach().float().clamp(0, 1).cpu().numpy()
+        masks = masks.detach().float().clamp(0, 1).cpu()
+        if positive_points:
+            def point_values(mask_tensor, points):
+                values = []
+                for point in points:
+                    if not isinstance(point, dict):
+                        continue
+                    x = max(0.0, min(1.0, float(point.get("x", 0.0))))
+                    y = max(0.0, min(1.0, float(point.get("y", 0.0))))
+                    px = int(round(x * max(0, source.width - 1)))
+                    py = int(round(y * max(0, source.height - 1)))
+                    values.append(float(mask_tensor[py, px]))
+                return values
+
+            scores = []
+            for candidate in masks:
+                positive_values = point_values(candidate, positive_points)
+                negative_values = point_values(candidate, negative_points)
+                positive_score = sum(positive_values) / max(1, len(positive_values))
+                negative_score = sum(negative_values) / max(1, len(negative_values))
+                scores.append(positive_score - negative_score)
+            best_index = max(range(len(scores)), key=scores.__getitem__)
+            if scores[best_index] <= 0:
+                raise RuntimeError("No SAM3 subject matched the green points. Adjust the prompt, points, or confidence.")
+            mask = masks[best_index].numpy()
+        else:
+            mask = masks[0].numpy()
         if float(mask.max()) <= 0.001:
             raise RuntimeError("SAM3 found no matching subject. Try a more specific prompt or lower confidence.")
         alpha = Image.fromarray((mask * 255.0).astype(np.uint8), "L")
@@ -3206,6 +3190,7 @@ async def sqr_sam3_cutout(request):
             "path": f"{subfolder}/{filename}",
             "width": result.width,
             "height": result.height,
+            "tagged": bool(positive_points),
         })
     except Exception as e:
         print(f"[SQR] sam3_cutout error: {_sqr_format_exc(e)}")
@@ -3285,7 +3270,7 @@ try {{
 async def sqr_compose_reference(request):
     """Compose positioned reference cutouts onto a solid or uploaded background."""
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageFilter, ImageOps
 
         payload = await request.json()
         width = max(64, min(4096, _sqr_to_int(payload.get("width"), 1024)))
@@ -3347,15 +3332,60 @@ async def sqr_compose_reference(request):
                 layer = ImageOps.mirror(layer)
             if _sqr_to_bool(raw.get("flip_vertical", False), False):
                 layer = ImageOps.flip(layer)
+            unrotated_layer = layer
             rotation = max(-180.0, min(180.0, float(raw.get("rotation", 0.0))))
             if abs(rotation) > 0.001:
                 layer = layer.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=True)
-            opacity = max(0.0, min(1.0, float(raw.get("opacity", 1.0))))
-            if opacity < 1.0:
-                layer.putalpha(layer.getchannel("A").point(lambda value: round(value * opacity)))
             target_w, target_h = layer.size
             center_x = float(raw.get("x", 0.5)) * width
             center_y = float(raw.get("y", 0.5)) * height
+            if _sqr_to_bool(raw.get("shadow_enabled", False), False):
+                shadow_color = str(raw.get("shadow_color") or "#000000").lstrip("#")
+                try:
+                    shadow_rgb = tuple(int(shadow_color[index:index + 2], 16) for index in (0, 2, 4)) if len(shadow_color) == 6 else (0, 0, 0)
+                except ValueError:
+                    shadow_rgb = (0, 0, 0)
+                shadow_opacity = max(0.0, min(1.0, float(raw.get("shadow_opacity", 0.45))))
+                shadow_blur = max(0.0, min(128.0, float(raw.get("shadow_blur", 24.0))))
+                shadow_width = max(0.25, min(2.5, float(raw.get("shadow_width", 1.0))))
+                shadow_mode = str(raw.get("shadow_mode") or "drop").lower()
+                shadow_source = unrotated_layer if shadow_mode == "ground" else layer
+                shadow = Image.new("RGBA", shadow_source.size, (*shadow_rgb, 0))
+                shadow.putalpha(shadow_source.getchannel("A").point(lambda value: round(value * shadow_opacity)))
+                if shadow_mode == "ground":
+                    compression = max(0.05, min(1.0, float(raw.get("shadow_compression", 0.22))))
+                    shadow = shadow.resize((
+                        max(1, round(shadow.width * shadow_width)),
+                        max(1, round(shadow.height * compression)),
+                    ), Image.Resampling.LANCZOS)
+                elif abs(shadow_width - 1.0) > 0.001:
+                    shadow = shadow.resize((max(1, round(shadow.width * shadow_width)), shadow.height), Image.Resampling.LANCZOS)
+                shadow_angle = max(-90.0, min(90.0, float(raw.get("shadow_angle", 0.0))))
+                ground_height = shadow.height
+                if abs(shadow_angle) > 0.001:
+                    shadow = shadow.rotate(-shadow_angle, resample=Image.Resampling.BICUBIC, expand=True)
+                angle_radians = math.radians(shadow_angle)
+                ground_anchor_x = shadow.width / 2 - math.sin(angle_radians) * ground_height / 2
+                ground_anchor_y = shadow.height / 2 + math.cos(angle_radians) * ground_height / 2
+                if shadow_blur > 0.001:
+                    padding = max(1, math.ceil(shadow_blur * 3))
+                    padded = Image.new("RGBA", (shadow.width + padding * 2, shadow.height + padding * 2))
+                    padded.alpha_composite(shadow, (padding, padding))
+                    shadow = padded.filter(ImageFilter.GaussianBlur(shadow_blur))
+                    ground_anchor_x += padding
+                    ground_anchor_y += padding
+                offset_x = float(raw.get("shadow_offset_x", 24.0))
+                offset_y = float(raw.get("shadow_offset_y", 28.0))
+                if shadow_mode == "ground":
+                    shadow_x = center_x + offset_x - ground_anchor_x
+                    shadow_y = center_y + unrotated_layer.height / 2 + offset_y - ground_anchor_y
+                else:
+                    shadow_x = center_x + offset_x - shadow.width / 2
+                    shadow_y = center_y + offset_y - shadow.height / 2
+                canvas.alpha_composite(shadow, (round(shadow_x), round(shadow_y)))
+            opacity = max(0.0, min(1.0, float(raw.get("opacity", 1.0))))
+            if opacity < 1.0:
+                layer.putalpha(layer.getchannel("A").point(lambda value: round(value * opacity)))
             canvas.alpha_composite(layer, (round(center_x - target_w / 2), round(center_y - target_h / 2)))
             composed += 1
         if not composed:

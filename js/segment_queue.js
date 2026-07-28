@@ -159,6 +159,42 @@ function _sqrPickAndUploadVideo() {
     });
 }
 
+function _sqrPickAndUploadVideos() {
+    return new Promise((resolve) => {
+        const inp = document.createElement("input");
+        inp.type = "file";
+        inp.accept = "video/mp4,video/quicktime,video/x-msvideo,video/webm,.mp4,.mov,.avi,.mkv,.webm";
+        inp.multiple = true;
+        inp.style.display = "none";
+        document.body.appendChild(inp);
+        inp.onchange = async () => {
+            const files = [...inp.files];
+            inp.remove();
+            if (!files.length) { resolve([]); return; }
+            const prog = _sqrUploadProgressUI(`Uploading ${files.length} video(s)...`);
+            const saved = [];
+            try {
+                for (const file of files) {
+                    const fd = new FormData();
+                    fd.append("file", file, file.name);
+                    const response = await fetch("/sqr/upload_video", {method: "POST", body: fd});
+                    const data = await response.json();
+                    if (!data.saved) throw new Error(data.error || `Failed to upload ${file.name}`);
+                    saved.push(data.saved);
+                }
+                prog.remove();
+                resolve(saved);
+            } catch (error) {
+                prog.remove();
+                alert(`Upload failed: ${error.message}`);
+                resolve(saved);
+            }
+        };
+        inp.oncancel = () => { inp.remove(); resolve([]); };
+        inp.click();
+    });
+}
+
 /** Full-screen upload progress overlay. */
 function _sqrUploadProgressUI(msg) {
     if (!document.getElementById("sqr-spin-style")) {
@@ -280,15 +316,17 @@ return new Promise(resolve => {
     });
     const mkDiv=(t,s)=>Object.assign(document.createElement("div"),{textContent:t,style:s||""});
     box.appendChild(mkDiv("Resume Merge: Select Existing Clips","font-size:14px;font-weight:700;"));
-    box.appendChild(mkDiv("Click videos to add them below. Drag to reorder, right-click to remove. The final video will be merged in this order.","font-size:11px;opacity:.6;"));
+    box.appendChild(mkDiv("Choose video files below. Drag to reorder, right-click to remove. The final video will be merged in this order.","font-size:11px;opacity:.6;"));
 
-    const pathBar = document.createElement("div");
-    Object.assign(pathBar.style, {
-        fontSize:"11px",opacity:".6",padding:"4px 0",minHeight:"18px",
-        borderBottom:"1px solid var(--border-color,#444)",marginBottom:"2px",
-        display:"flex",alignItems:"center",gap:"4px",flexWrap:"wrap"
-    });
-    box.appendChild(pathBar);
+    const pickClips = document.createElement("button");
+    pickClips.textContent = "Choose Video Files";
+    pickClips.style.cssText = "padding:7px 12px;border-radius:6px;cursor:pointer;";
+    pickClips.onclick = async () => {
+        const saved = await _sqrPickAndUploadVideos();
+        for (const path of saved) if (!selPaths.includes(path)) selPaths.push(path);
+        renderSel();
+    };
+    box.appendChild(pickClips);
 
     const selArea = document.createElement("div");
     Object.assign(selArea.style, {
@@ -318,34 +356,8 @@ return new Promise(resolve => {
         });
     }
 
-    const browserWrap = document.createElement("div");
-    Object.assign(browserWrap.style, { display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(90px,1fr))",gap:"6px",border:"1px solid var(--border-color,#444)",borderRadius:"8px",padding:"8px",maxHeight:"300px",overflowY:"auto",minHeight:"80px",alignContent:"flex-start" });
-    box.appendChild(browserWrap);
     box.appendChild(mkDiv("Selected clips: drag to reorder, right-click to remove","font-size:11px;opacity:.5;margin-top:2px;"));
     box.appendChild(selArea); renderSel();
-
-    async function loadDir(path) {
-        browserWrap.innerHTML = '<div style="opacity:.5;font-size:12px;padding:8px;grid-column:1/-1;">Loading...</div>'; pathBar.innerHTML = "";
-        try {
-            const url = path ? `/sqr/browse_videos?path=${encodeURIComponent(path)}` : "/sqr/browse_videos";
-            const data = await (await fetch(url)).json();
-            if (data.type === "dir" || data.type === "roots") { const rootBtn = mkDiv("🏠","cursor:pointer;padding:2px 6px;border-radius:4px;background:var(--comfy-input-bg,#333);"); rootBtn.onclick=()=>loadDir(null); pathBar.appendChild(rootBtn);
-                if (data.type === "dir") { pathBar.appendChild(mkDiv("›","opacity:.4;")); const sep = data.path.includes("\\") ? "\\" : "/"; let acc = data.path.match(/^[A-Za-z]:\\/)?.[0] || "/"; const parts = data.path.split(sep).filter(Boolean).slice(data.path.startsWith("/")?0:1);
-                    parts.forEach((part,i) => { acc = acc + (acc.endsWith(sep)?"":sep) + part; const snap=acc; const b=mkDiv(part,"cursor:pointer;padding:2px 6px;border-radius:4px;background:var(--comfy-input-bg,#333);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"); b.onclick=()=>loadDir(snap); pathBar.appendChild(b); if(i<parts.length-1) pathBar.appendChild(mkDiv("›","opacity:.4;")); }); } }
-            browserWrap.innerHTML = ""; browserWrap.style.display = "grid";
-            if (data.type === "roots") { data.roots.forEach(({label,path:p,is_drive})=>{ const icon = (p === "__drives__" || is_drive) ? "🖥" : "📁"; const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML=`<span>${icon}</span><span>${label}</span>`; row.onclick=()=>loadDir(p); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); });
-            } else {
-                if (data.parent) { const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML="<span>📁</span><span>.. Parent folder</span>"; row.onclick=()=>loadDir(data.parent); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); }
-                data.folders.forEach(f=>{ const fp=(data.path.endsWith("/")||data.path.endsWith("\\"))?data.path+f:data.path+"/"+f; const row=document.createElement("div"); row.style.cssText="grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;border-radius:5px;font-size:12px;"; row.innerHTML=`<span>📁</span><span>${f}</span>`; row.onclick=()=>loadDir(fp); row.onmouseover=()=>row.style.background="var(--comfy-input-bg,#333)"; row.onmouseout=()=>row.style.background=""; browserWrap.appendChild(row); });
-                if (!data.videos.length && !data.folders.length) { browserWrap.appendChild(mkDiv("(No video files or folders here)","opacity:.4;font-size:12px;padding:8px;grid-column:1/-1;")); } else if (!data.videos.length) { browserWrap.appendChild(mkDiv("(No videos here; open a folder)","opacity:.4;font-size:12px;padding:4px;grid-column:1/-1;")); }
-                data.videos.forEach(f=>{ const fp=(data.path.endsWith("/")||data.path.endsWith("\\"))?data.path+f:data.path+"/"+f; const alreadySel = selPaths.includes(fp);
-                    const card=document.createElement("div"); Object.assign(card.style,{ cursor:"pointer",border: alreadySel?"2px solid #4a6":"1px solid var(--border-color,#555)",borderRadius:"6px",padding:"6px 8px",background:"var(--comfy-input-bg,#2a2a2a)",display:"flex",flexDirection:"row",alignItems:"center",gap:"8px",fontSize:"11px",opacity: alreadySel?"0.55":"1",gridColumn:"1/-1" });
-                    const img=document.createElement("img"); img.src=`/sqr/video_thumb?file=${encodeURIComponent(fp)}`; img.style.cssText="width:72px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;"; img.draggable=false; img.onerror=()=>{img.style.display="none";};
-                    const nmWrap=document.createElement("div"); nmWrap.style.cssText="flex:1;overflow:hidden;"; const nm=mkDiv(f,"font-size:11px;opacity:.9;word-break:break-word;overflow-wrap:anywhere;line-height:1.4;"); nm.title=fp; nmWrap.appendChild(nm); card.append(img,nmWrap);
-                    card.onclick=()=>{ if (!selPaths.includes(fp)) { selPaths.push(fp); card.style.border="2px solid #4a6"; card.style.opacity="0.55"; } renderSel(); }; browserWrap.appendChild(card); });
-            }
-        } catch(e) { browserWrap.innerHTML=`<div style="opacity:.5;font-size:12px;padding:8px;grid-column:1/-1;">Failed to load: ${e.message}</div>`; }
-    }
 
     const btns=document.createElement("div"); btns.style.cssText="display:flex;gap:8px;margin-top:4px;";
     const mkBtn=(t,s,fn)=>{const b=document.createElement("button");b.textContent=t;b.style.cssText=`flex:1;padding:7px 18px;border-radius:7px;cursor:pointer;font-size:13px;${s}`;b.onclick=fn;return b;};
@@ -367,7 +379,6 @@ return new Promise(resolve => {
     );
     const _xBtn2=document.createElement("button");_xBtn2.textContent="×";_xBtn2.style.cssText="position:absolute;top:10px;right:12px;background:none;border:none;font-size:20px;cursor:pointer;color:var(--input-text,#aaa);line-height:1;padding:0;";_xBtn2.onclick=()=>{overlay.remove();resolve(null);};
     box.style.position="relative"; box.appendChild(_xBtn2); box.appendChild(btns); overlay.appendChild(box); document.body.appendChild(overlay);
-    fetch("/sqr/browse_videos").then(r=>r.json()).then(data=>{const o=data.roots?.find(r=>r.label==="ComfyUI output");loadDir(o?o.path:null);}).catch(()=>loadDir(null));
 });
 }
 

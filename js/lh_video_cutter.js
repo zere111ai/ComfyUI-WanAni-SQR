@@ -10,7 +10,6 @@ function cutterStyles() {
       .lhvc-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.lhvc button,.lhvc input,.lhvc select{border:1px solid #444;background:#242424;color:#ddd;border-radius:5px;padding:5px 7px;font-size:11px}.lhvc button{cursor:pointer}.lhvc button:hover{border-color:#888}.lhvc button.primary{background:#246044;border-color:#58bd88}.lhvc button.danger{color:#ffaaa0}.lhvc-execute{justify-content:center;padding-top:2px}.lhvc-execute button{min-width:120px}
       .lhvc-path{flex:1;min-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8fd;font:11px ui-monospace,monospace}.lhvc-video{width:100%;height:300px;min-height:150px;max-height:460px;background:#080808;border-radius:7px;object-fit:contain}.lhvc-canvas,.lhvc-wave{width:100%;background:#111;border:1px solid #444;border-radius:6px;cursor:ew-resize;touch-action:none}.lhvc-canvas{height:78px}.lhvc-wave{height:72px}.lhvc-canvas:focus,.lhvc-wave:focus{outline:1px solid #8fd;outline-offset:1px}.lhvc-wave-label{display:flex;align-items:center;gap:6px;color:#8ab;font-size:10px;margin-bottom:-5px}
       .lhvc-segments{display:flex;gap:5px;overflow-x:auto;padding:2px}.lhvc-chip{min-width:170px;position:relative;text-align:left;padding-right:25px!important;white-space:pre-line}.lhvc-chip.selected{border-color:#fff;box-shadow:0 0 0 2px #ffffff55 inset,0 0 9px #ffffff44}.lhvc-chip.playhead{border-color:#ffd166;background:#493d20;box-shadow:0 0 0 2px #ffd16688 inset,0 0 10px #ffd16666}.lhvc-chip.selected.playhead{box-shadow:0 0 0 2px #fff inset,0 0 0 4px #ffd16688 inset,0 0 12px #ffd16688}.lhvc-chip i{position:absolute;right:0;top:0;width:24px;height:100%;display:flex;align-items:center;justify-content:center;background:#421f1f;font-style:normal}.lhvc-chip-meta{display:flex;align-items:center;gap:4px;margin-top:4px}.lhvc-chip-meta input[type=text]{min-width:80px;width:112px;padding:3px 5px}.lhvc-chip-meta input[type=checkbox]{margin:0}.lhvc-nav input[type=number],.lhvc-nav input[type=text]{width:82px}.lhvc-nav input[type=range]{width:105px;padding:0}.lhvc-settings label,.lhvc-project label{display:flex;align-items:center;gap:5px;color:#aaa}.lhvc-settings input{width:140px}.lhvc-settings input[data-setting="output_subfolder"]{width:280px}.lhvc-project-path{flex:1;min-width:240px}.lhvc-project-name{width:150px}.lhvc-project-status{color:#8ab;font-size:10px;min-width:120px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lhvc-status{color:#aaa;font-size:10px;flex:1}
-      .lhvc-browser{position:fixed;inset:0;z-index:100050;background:#000c;display:flex;align-items:center;justify-content:center}.lhvc-browser-box{width:min(760px,92vw);max-height:86vh;background:#181818;border:1px solid #555;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px}.lhvc-list{display:flex;flex-direction:column;gap:4px;overflow:auto;min-height:260px}.lhvc-list button{text-align:left}.lhvc-browser-head{display:flex;align-items:center;gap:6px}.lhvc-browser-head span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8fd}
     `;
     document.head.appendChild(style);
 }
@@ -773,16 +772,27 @@ class LHVideoCutterUI {
     }
 
     async loadProject() {
-        this.projectDirectory = this.projectDirectoryInput.value.trim();
-        this.projectFilename = this.projectFilenameInput.value.trim() || "LH_Video_Cutter_Task";
-        this.projectStatus.textContent = "正在读取…";
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "application/json,.json";
+        input.style.display = "none";
+        document.body.appendChild(input);
+        const file = await new Promise(resolve => {
+            input.onchange = () => resolve(input.files?.[0] || null);
+            input.oncancel = () => resolve(null);
+            input.click();
+        });
+        input.remove();
+        if (!file) return;
+        this.projectStatus.textContent = `正在读取：${file.name}`;
         try {
+            const parsedProject = JSON.parse(await file.text());
             const response = await fetch("/sqr/video_cutter/load_project", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({
-                    directory: this.projectDirectory,
-                    filename: this.projectFilename,
+                    project: parsedProject,
+                    display_name: file.name,
                     current_video_path: value(this.node, "video_path", ""),
                 }),
             });
@@ -796,7 +806,8 @@ class LHVideoCutterUI {
             setValue(this.node, "filename_prefix", project.filename_prefix || "segment");
             setValue(this.node, "cut_mode", project.cut_mode || "accurate_h264");
             this.readCuts();
-            this.setProjectPath(data.path);
+            this.projectFilename = file.name.replace(/\.json$/i, "") || "LH_Video_Cutter_Task";
+            this.projectFilenameInput.value = this.projectFilename;
             const uiState = project.ui_state && typeof project.ui_state === "object" ? project.ui_state : {};
             this.playhead = clamp(Math.round(Number(uiState.playhead) || 0), 0, Math.max(0, this.totalFrames - 1));
             this.selectedSegment = clamp(Math.round(Number(uiState.selected_segment) || 0), 0, this.cuts.length);
@@ -821,7 +832,7 @@ class LHVideoCutterUI {
             await this.loadVideo();
             if (this.fps > 0) this.video.currentTime = this.playhead / this.fps;
             this.render();
-            this.projectStatus.textContent = `已加载：${data.path}`;
+            this.projectStatus.textContent = `已加载：${file.name}`;
         } catch (error) {
             this.projectStatus.textContent = `加载失败：${error}`;
         }
@@ -1044,33 +1055,42 @@ class LHVideoCutterUI {
     }
 
     async openBrowser() {
-        document.querySelector(".lhvc-browser")?.remove();
-        const overlay = document.createElement("div"); overlay.className = "lhvc-browser";
-        const box = document.createElement("div"); box.className = "lhvc-browser-box";
-        const head = document.createElement("div"); head.className = "lhvc-browser-head";
-        const back = document.createElement("button"); back.textContent = "←";
-        const pathLabel = document.createElement("span");
-        const close = document.createElement("button"); close.textContent = "关闭"; close.onclick = () => overlay.remove();
-        head.append(back, pathLabel, close); box.appendChild(head);
-        const list = document.createElement("div"); list.className = "lhvc-list"; box.appendChild(list); overlay.appendChild(box); document.body.appendChild(overlay);
-        let current = "", parent = "";
-        const load = async path => {
-            list.textContent = "加载中…";
-            const response = await fetch(`/sqr/browse_videos${path ? `?path=${encodeURIComponent(path)}` : ""}`), data = await response.json();
-            list.innerHTML = "";
-            if (data.type === "roots") {
-                pathLabel.textContent = "选择位置"; back.disabled = true;
-                for (const root of data.roots || []) add(root.label, () => load(root.path));
-                return;
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "video/mp4,video/quicktime,video/x-msvideo,video/webm,.mp4,.mov,.avi,.mkv,.webm";
+        input.style.display = "none";
+        document.body.appendChild(input);
+        input.onchange = async () => {
+            const file = input.files?.[0];
+            input.remove();
+            if (!file) return;
+            this.status.textContent = `正在上传：${file.name}`;
+            try {
+                const body = new FormData();
+                body.append("file", file, file.name);
+                const response = await fetch("/sqr/upload_video", {method: "POST", body});
+                const data = await response.json();
+                if (!data.saved) throw new Error(data.error || "upload failed");
+                setValue(this.node, "video_path", data.saved);
+                this.cuts = [];
+                this.segmentMeta = {};
+                this.detectedCuts = [];
+                this.playhead = 0;
+                this.selectedSegment = 0;
+                this.activeCutIndex = -1;
+                this.timelineZoom = 1;
+                this.viewStart = 0;
+                this.undoStack = [];
+                this.redoStack = [];
+                this.persist();
+                await this.loadVideo();
+                this.status.textContent = `已加载：${file.name}`;
+            } catch (error) {
+                this.status.textContent = `视频加载失败：${error}`;
             }
-            current = data.path || path; parent = data.parent || ""; pathLabel.textContent = current; back.disabled = false;
-            for (const folder of data.folders || []) add(`📁 ${folder}`, () => load(`${current.replace(/[\\/]$/, "")}\\${folder}`));
-            for (const file of data.videos || []) add(`🎬 ${file}`, () => { const selected = `${current.replace(/[\\/]$/, "")}\\${file}`; setValue(this.node, "video_path", selected); this.cuts = []; this.segmentMeta = {}; this.detectedCuts = []; this.playhead = 0; this.selectedSegment = 0; this.activeCutIndex = -1; this.timelineZoom = 1; this.viewStart = 0; this.undoStack = []; this.redoStack = []; this.persist(); overlay.remove(); this.loadVideo(); });
         };
-        const add = (label, action) => { const button = document.createElement("button"); button.textContent = label; button.onclick = action; list.appendChild(button); };
-        back.onclick = () => load(parent || "");
-        overlay.onclick = event => { if (event.target === overlay) overlay.remove(); };
-        load("");
+        input.oncancel = () => input.remove();
+        input.click();
     }
 
     destroy() {

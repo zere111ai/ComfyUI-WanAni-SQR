@@ -258,11 +258,14 @@ async def lh_video_cutter_save_project(request):
 async def lh_video_cutter_load_project(request):
     try:
         payload = await request.json()
-        path = _project_path(payload.get("directory"), payload.get("filename"))
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"Task file was not found: {path}")
-        with open(path, "r", encoding="utf-8") as handle:
-            project = json.load(handle)
+        project = payload.get("project")
+        path = str(payload.get("display_name") or "")
+        if not isinstance(project, dict):
+            path = _project_path(payload.get("directory"), payload.get("filename"))
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Task file was not found: {path}")
+            with open(path, "r", encoding="utf-8") as handle:
+                project = json.load(handle)
         if not isinstance(project, dict) or project.get("schema") != "lh_video_cutter_project":
             raise ValueError("This is not an LH Video Cutter task file.")
         saved_source = _resolve_video(project.get("video_path"))
@@ -275,7 +278,7 @@ async def lh_video_cutter_load_project(request):
                 raise ValueError("The current target video path does not match the saved task.")
         if not isinstance(project.get("cuts_data"), dict):
             raise ValueError("The task file contains invalid cut data.")
-        return web.json_response({"ok": True, "path": os.path.normpath(path), "project": project})
+        return web.json_response({"ok": True, "path": os.path.normpath(path) if path else "", "project": project})
     except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
