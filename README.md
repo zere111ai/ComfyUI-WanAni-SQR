@@ -4,6 +4,30 @@
 
 An automated long-video segment queue runner focused on ComfyUI core WanAnimate workflows, supporting segmented generation, transition injection, auto scene switching, breakpoint resuming, auto merging, and audio sync.
 
+## Update 2026-JUL-29 — Reliable Audio, Final Preview, and Queue Latency
+
+## Summary--
+Use the same ffmpeg installation as VideoHelperSuite, publish the final merged video back to the live Video Combine preview, and fail closed when final merging does not complete.
+
+## Description--
+
+- Reused `VHS_FORCE_FFMPEG_PATH`, the loaded VideoHelperSuite ffmpeg path, system ffmpeg, or imageio-ffmpeg instead of requiring `ffmpeg` to be present in the system `PATH`.
+- Kept the source audio input when audio probing is unavailable, avoiding silent output caused by treating an unprobeable source as an audio-free source.
+- Required the source audio stream during final remux so an audio failure is reported rather than silently producing a video-only file.
+- Published the completed `sqr_merged_*.mp4` back to the configured `VHS_VideoCombine` node for live ComfyUI preview.
+- Preserved the recovery checkpoint when final concatenation or audio remux fails.
+- Re-probed the completed file after audio remux. Uncertain source probing, audio-write failure, and final validation failure now have distinct logs and none can mark the task complete.
+- Reduced the inter-segment history polling interval from five seconds to one second.
+- Added explicit warnings when an unsafe SCAIL-2 batch size is normalized to `1`, or when video is being generated directly above 20 FPS without frame interpolation.
+- Added an **Original Hard Cut** segment mode that slices the current source range, bypasses KSampler, VAE, and SAM3, logs the full temporary path, and includes that slice in the final merge.
+- Added dedicated `current segment video frames` and `current segment reference image` outputs to `WAN ANI DIRECTOR`. Connect the driving SAM3 node to the former and the reference SAM3 node to the latter.
+- Added quality-preserving model micro-segmentation. Editorial Director shots keep their prompts, references, Character Lock, and exact source ranges, while sampled shots above the 81-frame Wan context are automatically balanced into smaller queue jobs. Continuous-transition jobs target about 65 visible frames so the additional 16-frame SCAIL-2 carry remains inside one 81-frame model context.
+- Made transition artifacts demand-driven. With continuous transition disabled, SQR no longer encodes a hidden full video or saves a latent; with transition enabled, it does so only when another segment actually needs the handoff.
+- After each segment, removed consumed transition videos, stale latents, temporary reference copies, and hidden full videos, then released unused Python/CUDA allocator blocks. Successful final merging also removes this run's intermediate segment files.
+- Reused the same VideoHelperSuite-aware ffmpeg resolver in LH Video Cutter.
+
+Restart ComfyUI and hard-refresh the browser after updating.
+
 ## Update 2026-JUL-28 — Native File Loading, Person Editing, and Director Timing
 
 ## Summary--

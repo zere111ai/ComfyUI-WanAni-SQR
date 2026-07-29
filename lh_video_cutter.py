@@ -1,13 +1,14 @@
 import asyncio
 import json
 import os
-import shutil
 import subprocess
 
 from aiohttp import web
 
 import folder_paths
 import server
+
+from .sqr_media import resolve_ffmpeg_path
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
@@ -36,7 +37,7 @@ def _safe_name(value, fallback):
 
 
 def _render_waveform(source, width):
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = resolve_ffmpeg_path()
     if not ffmpeg:
         raise RuntimeError("ffmpeg was not found")
     command = [
@@ -135,7 +136,7 @@ class LHVideoCutter:
         if not selected_indices:
             raise ValueError("LH Video Cutter: no segments are selected for export")
 
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = resolve_ffmpeg_path()
         if not ffmpeg:
             raise RuntimeError("LH Video Cutter: ffmpeg was not found")
 

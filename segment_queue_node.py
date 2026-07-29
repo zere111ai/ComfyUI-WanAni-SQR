@@ -7,6 +7,19 @@ import server, folder_paths
 from aiohttp import web
 from comfy.cli_args import args
 
+from .sqr_media import (
+    build_video_preview,
+    merge_videos,
+    probe_audio_stream,
+)
+from .sqr_runtime import (
+    expand_director_plan_for_context,
+    is_passthrough_segment,
+    prune_prompt_to_outputs,
+    release_segment_memory,
+    remove_managed_path,
+)
+
 # ── 日志缓冲（前端弹窗读取）──────────────────────────────────────
 _sqr_log_buf: dict = {}
 
@@ -99,6 +112,7 @@ def parse_director_plan(director_data, total_frames: int) -> list:
         config["start"] = start
         config["end"] = end
         config["id"] = str(config.get("id") or f"seg_{index + 1}")
+        config["source_data_index"] = index
         config["visible_length"] = visible_length
         config["model_length"] = model_length
         refs = config.get("references", [])
@@ -823,9 +837,14 @@ def find_multi_reference_node(prompt: dict) -> str | None:
     return None
 
 
-def find_driving_sam3_node(prompt: dict, video_node_id: str) -> str | None:
+def find_driving_sam3_node(
+    prompt: dict,
+    video_node_id: str,
+    director_node_id: str | None = None,
+) -> str | None:
     """Find the SAM3 tracker whose image input comes from the driving video."""
     source_id = str(video_node_id)
+    director_id = str(director_node_id or "")
     fallback = None
     for nid, node in prompt.items():
         if node.get("class_type") != "SAM3_VideoTrack":
@@ -834,36 +853,15 @@ def find_driving_sam3_node(prompt: dict, video_node_id: str) -> str | None:
         images = node.get("inputs", {}).get("images")
         if isinstance(images, list) and len(images) == 2 and str(images[0]) == source_id:
             return str(nid)
+        if (
+            isinstance(images, list)
+            and len(images) == 2
+            and director_id
+            and str(images[0]) == director_id
+            and _sqr_to_int(images[1], -1) == 2
+        ):
+            return str(nid)
     return fallback
-
-
-def media_has_audio(path: str | None) -> bool:
-    """Return True only when the media file contains at least one audio stream."""
-    if not path or not os.path.isfile(path):
-        return False
-    import shutil
-    import subprocess
-
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return False
-    ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if os.name == "nt" else "ffprobe")
-    if not os.path.isfile(ffprobe):
-        ffprobe = shutil.which("ffprobe")
-    try:
-        if ffprobe:
-            result = subprocess.run(
-                [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", path],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
-            )
-            return result.returncode == 0 and bool(result.stdout.strip())
-        result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-i", path], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=20,
-        )
-        return "Audio:" in (result.stderr or "")
-    except Exception:
-        return False
 
 
 def _sqr_rewire_image_output(prompt: dict, old_ref, new_ref):
@@ -940,7 +938,7 @@ def queue_prompt(workflow, host=None, client_id="") -> str:
     raise last_err
 
 
-def wait_for_prompt(prompt_id, host=None, poll=5) -> bool:
+def wait_for_prompt(prompt_id, host=None, poll=1.0) -> bool:
     while True:
         time.sleep(poll)
         for _host in [host or _sqr_get_comfy_host(), _sqr_get_comfy_host(force_refresh=True)]:
@@ -989,6 +987,40 @@ def get_output_video_info(prompt_id, combine_node_id, host=None, logger=None):
     else:
         print(f"[SQR] {msg}")
     return None, None
+
+
+def _sqr_publish_video_preview(
+        video_path, frame_rate, client_id, node_id, prompt_id, logger=None):
+    """Publish an externally merged video to the live VHS preview widget."""
+    if not client_id or node_id is None:
+        return False
+    preview = build_video_preview(
+        video_path,
+        folder_paths.get_output_directory(),
+        frame_rate,
+    )
+    if not preview:
+        if logger:
+            logger("⚠ 最终视频已保存，但无法构建 ComfyUI 预览记录")
+        return False
+    try:
+        server.PromptServer.instance.send_sync(
+            "executed",
+            {
+                "node": str(node_id),
+                "display_node": str(node_id),
+                "output": {"gifs": [preview]},
+                "prompt_id": str(prompt_id or ""),
+            },
+            client_id,
+        )
+        if logger:
+            logger(f"✓ 已回传最终视频预览: {preview['filename']}")
+        return True
+    except Exception as exc:
+        if logger:
+            logger(f"⚠ 最终视频预览回传失败: {_sqr_format_exc(exc)}")
+        return False
 
 
 def get_output_latent_info(prompt_id, latent_node_id, host=None, logger=None):
@@ -1209,83 +1241,6 @@ class SQRRepeatFirstFrames:
         return (torch.cat((prefix, images), dim=0),)
 
 
-def merge_videos(video_paths: list, output_path: str, target_fps: float = None,
-                 source_audio_path: str = None, total_frames: int = None,
-                 source_fps: float = None) -> bool:
-    import subprocess, tempfile
-    if not video_paths:
-        return False
-
-    replace_audio = bool(source_audio_path and os.path.isfile(source_audio_path)
-                         and source_fps and source_fps > 0
-                         and total_frames and total_frames > 0)
-    concat_output = tempfile.mktemp(suffix=".mp4") if replace_audio else output_path
-    list_path = None
-    converted = []
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
-                                         delete=False, encoding="utf-8") as f:
-            for p in video_paths:
-                f.write("file " + repr(p) + "\n")
-            list_path = f.name
-
-        if target_fps and target_fps > 0:
-            fps_str = f"{target_fps:.6f}".rstrip("0").rstrip(".")
-            for vp in video_paths:
-                tmp = tempfile.mktemp(suffix=".mp4")
-                cv_cmd = ["ffmpeg", "-y", "-i", vp,
-                          "-r", fps_str,
-                          "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                          "-c:a", "copy", tmp]
-                r2 = subprocess.run(cv_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-                converted.append(tmp if r2.returncode == 0 else vp)
-            with open(list_path, "w", encoding="utf-8") as lf:
-                for p in converted:
-                    lf.write("file " + repr(p) + "\n")
-
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-               "-i", list_path, "-c", "copy", concat_output]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if result.returncode != 0:
-            print(f"[SQR] ffmpeg concat error: {result.stderr[-300:]}")
-            return False
-
-        if not replace_audio:
-            return True
-
-        duration = total_frames / source_fps
-        remux_cmd = [
-            "ffmpeg", "-y", "-i", concat_output, "-i", source_audio_path,
-            "-map", "0:v:0", "-map", "1:a:0?",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{duration:.9f}", "-movflags", "+faststart", output_path,
-        ]
-        remux_result = subprocess.run(remux_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if remux_result.returncode == 0:
-            return True
-        print(f"[SQR] ffmpeg audio remux error: {remux_result.stderr[-300:]}")
-        return False
-    except FileNotFoundError:
-        print("[SQR] ffmpeg executable was not found")
-        return False
-    except Exception as e:
-        print(f"[SQR] merge error: {e}")
-        return False
-    finally:
-        for temp_path in [list_path, concat_output if replace_audio else None]:
-            try:
-                if temp_path and os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            except Exception:
-                pass
-        for temp_path in converted:
-            try:
-                if temp_path not in video_paths and os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            except Exception:
-                pass
-
-
 class SegmentQueueRunner:
     CATEGORY = "video/utils"
     FUNCTION = "run"
@@ -1380,22 +1335,86 @@ class SegmentQueueRunner:
         _plan_frames = max(1, total_frames - _frame_offset) if _frame_offset > 0 else total_frames
 
         director_plan = []
+        director_source_segment_count = 0
         director_base_prompts = []
         director_prompts = []
         director_guide_path = ""
         director_color_config = {"enabled": False, "reference_path": "", "strength": 1.0}
         if director_data and str(director_data).strip() not in ("", "{}"):
             try:
-                director_plan = parse_director_plan(director_data, _plan_frames)
-                director_base_prompts = resolve_director_prompts(director_data)
-                director_prompts = resolve_director_composed_prompts(director_data)
+                source_director_plan = parse_director_plan(
+                    director_data,
+                    _plan_frames,
+                )
+                director_source_segment_count = len(source_director_plan)
+                source_base_prompts = resolve_director_prompts(director_data)
+                source_composed_prompts = resolve_director_composed_prompts(
+                    director_data
+                )
+                director_plan = expand_director_plan_for_context(
+                    source_director_plan,
+                    transition_enabled=transition_enabled,
+                )
+                director_base_prompts = [
+                    (
+                        source_base_prompts[
+                            _sqr_to_int(
+                                config.get("source_segment_index"),
+                                0,
+                            )
+                        ]
+                        if source_base_prompts
+                        and _sqr_to_int(
+                            config.get("source_segment_index"),
+                            0,
+                        )
+                        < len(source_base_prompts)
+                        else ""
+                    )
+                    for _, _, config in director_plan
+                ]
+                director_prompts = [
+                    (
+                        source_composed_prompts[
+                            _sqr_to_int(
+                                config.get("source_segment_index"),
+                                0,
+                            )
+                        ]
+                        if source_composed_prompts
+                        and _sqr_to_int(
+                            config.get("source_segment_index"),
+                            0,
+                        )
+                        < len(source_composed_prompts)
+                        else ""
+                    )
+                    for _, _, config in director_plan
+                ]
                 director_guide_path = first_director_guide_path(director_data)
                 director_color_config = first_director_color_match_config(director_data)
             except ValueError as exc:
                 _sqr_log(unique_id, f"[SQR] ✗ {exc}")
                 return {}
-            if director_plan and (not director_base_prompts or not director_base_prompts[0]):
-                _sqr_log(unique_id, "[SQR] ✗ Director 第一段必须填写 positive 提示词。")
+            first_sampled_index = next(
+                (
+                    index
+                    for index, (_, _, config) in enumerate(director_plan)
+                    if not is_passthrough_segment(config)
+                ),
+                None,
+            )
+            if (
+                first_sampled_index is not None
+                and (
+                    first_sampled_index >= len(director_base_prompts)
+                    or not director_base_prompts[first_sampled_index]
+                )
+            ):
+                _sqr_log(
+                    unique_id,
+                    "[SQR] ✗ Director 第一个需要采样的分段必须填写 positive 提示词。",
+                )
                 return {}
 
         _preview_segments = len(director_plan) if director_plan else segments
@@ -1403,12 +1422,28 @@ class SegmentQueueRunner:
         if director_plan:
             rows = ["Director 手动分段计划:"]
             for idx, (skip, length, cfg) in enumerate(director_plan, 1):
-                mode = "人物替换" if str(cfg.get("mode", "transfer")).lower() == "replacement" else "动作/表情迁移"
+                mode = (
+                    "原片硬切（跳过采样）"
+                    if is_passthrough_segment(cfg)
+                    else (
+                        "人物替换"
+                        if str(cfg.get("mode", "transfer")).lower()
+                        == "replacement"
+                        else "动作/表情迁移"
+                    )
+                )
                 visible = _sqr_to_int(cfg.get("visible_length"), length)
+                micro_count = _sqr_to_int(cfg.get("micro_count"), 1)
+                micro_index = _sqr_to_int(cfg.get("micro_index"), 1)
+                micro_note = (
+                    f" | 微分段={micro_index}/{micro_count}"
+                    if micro_count > 1
+                    else ""
+                )
                 rows.append(
                     f"  {idx}. {skip}-{skip + visible}帧 ({visible}帧, Wan窗口={length}) | {mode} | "
                     f"Multi Ref={'ON' if _sqr_to_bool(cfg.get('multi_ref', False)) else 'OFF'} | "
-                    f"参考图={len(cfg.get('references', []))}"
+                    f"参考图={len(cfg.get('references', []))}{micro_note}"
                 )
             plan_text = "\n".join(rows)
         else:
@@ -1461,7 +1496,18 @@ class SegmentQueueRunner:
         if director_plan:
             seg_list = [(skip, limit) for skip, limit, _ in director_plan]
             segment_configs = [cfg for _, _, cfg in director_plan]
-            _sqr_log(unique_id, f"[SQR] Director 模式: 使用 {len(seg_list)} 个手动分段")
+            if len(seg_list) > director_source_segment_count:
+                _sqr_log(
+                    unique_id,
+                    f"[SQR] 质量保护: {director_source_segment_count} 个镜头段 "
+                    f"→ {len(seg_list)} 个模型微分段；"
+                    f"{'连续过渡按约 65 帧收敛' if transition_enabled else '单次采样不超过 81 帧'}",
+                )
+            else:
+                _sqr_log(
+                    unique_id,
+                    f"[SQR] Director 模式: 使用 {len(seg_list)} 个手动分段",
+                )
         else:
             seg_list = calc_segments(_effective_frames, segments)
             segment_configs = [{} for _ in seg_list]
@@ -1487,7 +1533,15 @@ class SegmentQueueRunner:
                 # conditioning index out of range. Normalize it before each
                 # queued segment is submitted; the transition node also keeps a
                 # runtime guard as a last-resort safety net.
-                _node.setdefault("inputs", {})["batch_size"] = 1
+                _transition_inputs = _node.setdefault("inputs", {})
+                _saved_batch_size = _transition_inputs.get("batch_size", 1)
+                _transition_inputs["batch_size"] = 1
+                if _saved_batch_size != 1:
+                    _sqr_log(
+                        unique_id,
+                        f"[SQR] ⚠ SCAIL-2 batch_size "
+                        f"{_saved_batch_size} → 1（分段视频安全保护）",
+                    )
             if _node.get("class_type") == "SQRScail2ColoredMaskAdvanced":
                 _inputs = _node.setdefault("inputs", {})
                 current_identity = _inputs.get("identity_mode")
@@ -1498,7 +1552,11 @@ class SegmentQueueRunner:
 
         ae_nid = ae_node_id or find_animate_embeds_node(base_prompt) or ""
         vc_nid = find_video_combine_node(base_prompt, combine_nid) or ""
-        driving_sam3_nid = find_driving_sam3_node(base_prompt, node_id) or ""
+        driving_sam3_nid = find_driving_sam3_node(
+            base_prompt,
+            node_id,
+            unique_id,
+        ) or ""
 
         ref_images_list = []
         ref_image_groups = []
@@ -1572,8 +1630,29 @@ class SegmentQueueRunner:
                 if isinstance(director_checkpoint_snapshot, dict):
                     snapshot_segments = director_checkpoint_snapshot.get("segments", [])
                     for snapshot_index, snapshot_segment in enumerate(snapshot_segments):
-                        if isinstance(snapshot_segment, dict) and snapshot_index < len(ref_image_groups):
-                            snapshot_segment["references"] = copy.deepcopy(ref_image_groups[snapshot_index])
+                        if not isinstance(snapshot_segment, dict):
+                            continue
+                        matching_group = next(
+                            (
+                                ref_image_groups[plan_index]
+                                for plan_index, (_, _, config)
+                                in enumerate(director_plan)
+                                if _sqr_to_int(
+                                    config.get(
+                                        "source_data_index",
+                                        config.get("source_segment_index"),
+                                    ),
+                                    -1,
+                                )
+                                == snapshot_index
+                                and plan_index < len(ref_image_groups)
+                            ),
+                            None,
+                        )
+                        if matching_group is not None:
+                            snapshot_segment["references"] = copy.deepcopy(
+                                matching_group
+                            )
                     director_checkpoint_snapshot["checkpoint_version"] = 2
             except Exception as exc:
                 print(f"[SQR] Director checkpoint snapshot failed: {exc}")
@@ -1622,11 +1701,24 @@ class SegmentQueueRunner:
         audio_filename = find_audio_filename(base_prompt, node_id)
         if audio_filename:
             _audio_source_path = _sqr_resolve_media_path(audio_filename)
-            if media_has_audio(_audio_source_path):
-                _sqr_log(unique_id, f"[SQR] 音频文件: {audio_filename}")
-            else:
+            _has_audio, _audio_probe_detail = probe_audio_stream(
+                _audio_source_path
+            )
+            if _has_audio is True:
+                _sqr_log(
+                    unique_id,
+                    f"[SQR] 音频文件: {audio_filename} "
+                    f"({_audio_probe_detail})",
+                )
+            elif _has_audio is False:
                 _sqr_log(unique_id, f"[SQR] ℹ 输入视频不含音频流，将按无音频模式处理: {audio_filename}")
                 audio_filename = None
+            else:
+                _sqr_log(
+                    unique_id,
+                    f"[SQR] ⚠ 无法可靠检测源音轨，将保留音频输入并让 VHS "
+                    f"继续处理: {_audio_probe_detail}",
+                )
         else:
             _sqr_log(unique_id, f"[SQR] ⚠ 无法获取音频文件名")
 
@@ -1655,6 +1747,11 @@ class SegmentQueueRunner:
                 latent_src_node = find_latent_source_for_images(base_prompt, image_src_node)
                 if latent_src_node:
                     print(f"[SQR] latent来源: {latent_src_node}")
+        if frame_rate > 20 and not frame_interpolate_nid:
+            log(
+                f"⚠ 当前以 {frame_rate:g} fps 直接生成扩散帧，且输出链未检测到 "
+                "FrameInterpolate；长视频建议先按 15/16 fps 生成后再 2x 插帧"
+            )
 
         pre_segment_paths = [p.strip() for p in sqr_pre_segments.split(",")
                              if p.strip() and os.path.isfile(p.strip())] \
@@ -1668,13 +1765,100 @@ class SegmentQueueRunner:
             last_video_path   = manual_video_path
             last_video_frames = manual_video_frames
             last_latent_name  = None
+            last_prompt_id    = ""
             segment_output_paths = []
-            sqr_cut_cleanup = []
+            generated_segment_paths = []
             sqr_full_cleanup = []
-            sqr_cut_paths   = []
             _t0 = time.time()
             _total_frames_ran = sum(limit for _, limit in segs_to_run)
             _all_done = False
+
+            def _cleanup_managed(path, prefixes, keep_paths=()):
+                try:
+                    removed = remove_managed_path(
+                        path,
+                        [
+                            folder_paths.get_input_directory(),
+                            folder_paths.get_output_directory(),
+                            folder_paths.get_temp_directory(),
+                        ],
+                        prefixes,
+                        keep_paths=keep_paths,
+                    )
+                    if removed:
+                        log(f"  缓存收敛：已清理 {os.path.realpath(path)}")
+                    return removed
+                except Exception as exc:
+                    log(f"  ⚠ 缓存清理失败: {_sqr_format_exc(exc)}")
+                    return False
+
+            def _persist_segment_checkpoint(seg_num, skip, limit):
+                if not unique_id or _is_remote:
+                    return
+                load_video_inputs = base_prompt.get(node_id, {}).get(
+                    "inputs", {}
+                )
+                ref_video_params = {
+                    "video": load_video_inputs.get("video", ""),
+                    "force_rate": load_video_inputs.get("force_rate", 0),
+                    "frame_load_cap": load_video_inputs.get(
+                        "frame_load_cap", 0
+                    ),
+                    "skip_first_frames": load_video_inputs.get(
+                        "skip_first_frames", 0
+                    ),
+                    "select_every_nth": load_video_inputs.get(
+                        "select_every_nth", 1
+                    ),
+                }
+                next_index = seg_num
+                if next_index < len(seg_list):
+                    resume_offset = (
+                        _frame_offset + seg_list[next_index][0]
+                    )
+                else:
+                    resume_offset = _frame_offset + skip + limit
+                write_checkpoint(
+                    unique_id,
+                    {
+                        "unique_id": unique_id,
+                        "run_stamp": run_stamp,
+                        "completed_seg": seg_num,
+                        "total_segs": len(seg_list),
+                        "next_seg": seg_num + 1,
+                        "transition_video": (
+                            os.path.basename(last_video_path)
+                            if last_video_path
+                            else ""
+                        ),
+                        "transition_latent": last_latent_name or "",
+                        "ref_images": ref_images_list,
+                        "ref_image_groups": ref_image_groups,
+                        "director_snapshot": director_checkpoint_snapshot,
+                        "director_settings": {
+                            "transition_enabled": transition_enabled,
+                            "multi_ref_enabled": multi_ref_enabled,
+                            "replacement_enabled": replacement_enabled,
+                            "video_node_id": node_id,
+                            "reference_node_id": ri_node_id,
+                            "motion_node_id": ae_node_id,
+                            "output_node_id": combine_nid,
+                        },
+                        "identity_groups": [
+                            _sqr_ref_identity_groups(group, max_refs=6)[0]
+                            for group in ref_image_groups
+                        ],
+                        "segment_outputs": list(segment_output_paths),
+                        "segments": segments,
+                        "ref_video": ref_video_params.get("video", ""),
+                        "ref_video_params": ref_video_params,
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "base_frame_offset": _frame_offset,
+                        "frame_offset_for_resume": resume_offset,
+                        "total_frames_used": total_frames,
+                        "frame_rate_used": frame_rate,
+                    },
+                )
 
             log(f"{'═'*20} 运行时间码={run_stamp} {'═'*20}")
             log(f"AnimateEmbeds节点: [{ae_nid}]")
@@ -1699,6 +1883,10 @@ class SegmentQueueRunner:
                 total_segs     = len(seg_list)
                 wf             = copy.deepcopy(base_prompt)
                 seg_config     = segment_configs[seg_num - 1] if seg_num - 1 < len(segment_configs) else {}
+                passthrough_segment = is_passthrough_segment(seg_config)
+                consumed_transition_path = last_video_path
+                consumed_latent_name = last_latent_name
+                segment_temp_inputs = set()
                 seg_positive   = director_prompts[seg_num - 1] if seg_num - 1 < len(director_prompts) else ""
                 visible_limit  = _sqr_to_int(seg_config.get("visible_length"), limit)
                 seg_multi_ref  = _sqr_to_bool(seg_config.get("multi_ref", multi_ref_enabled), multi_ref_enabled)
@@ -1770,8 +1958,14 @@ class SegmentQueueRunner:
                     elif seg_num == 1:
                         startup_trim_reason = "first segment"
                     elif ref_image_groups:
-                        cur_group_index = min(i, len(ref_image_groups) - 1)
-                        prev_group_index = min(max(0, i - 1), len(ref_image_groups) - 1)
+                        cur_group_index = min(
+                            seg_num - 1,
+                            len(ref_image_groups) - 1,
+                        )
+                        prev_group_index = min(
+                            max(0, seg_num - 2),
+                            len(ref_image_groups) - 1,
+                        )
                         cur_group_sig = tuple((_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x)) for x in ref_image_groups[cur_group_index])
                         prev_group_sig = tuple((_sqr_ref_entry_path(x), _sqr_ref_entry_is_bg(x)) for x in ref_image_groups[prev_group_index])
                         if cur_group_sig != prev_group_sig:
@@ -1791,6 +1985,102 @@ class SegmentQueueRunner:
 
                 wf[node_id]["inputs"]["skip_first_frames"] = main_ref_skip_first + _video_skip
                 wf[node_id]["inputs"]["frame_load_cap"]    = _video_limit
+                if passthrough_segment:
+                    if not vc_nid or vc_nid not in wf:
+                        log(
+                            f"✗ 第{seg_num}段为原片硬切，但未找到 "
+                            "VHS_VideoCombine 输出节点"
+                        )
+                        break
+                    exact_length = max(1, visible_limit)
+                    wf[node_id]["inputs"]["frame_load_cap"] = exact_length
+                    passthrough_images = [node_id, 0]
+                    if frame_interpolate_nid and frame_interpolate_nid in wf:
+                        wf[frame_interpolate_nid].setdefault(
+                            "inputs", {}
+                        )["images"] = passthrough_images
+                        passthrough_images = [frame_interpolate_nid, 0]
+
+                    vc_inputs = wf[vc_nid].setdefault("inputs", {})
+                    vc_inputs["images"] = passthrough_images
+                    vc_inputs["save_output"] = True
+                    vc_inputs["save_metadata"] = False
+                    if audio_filename:
+                        passthrough_audio_id = (
+                            f"sqr_passthrough_audio_{seg_num}"
+                        )
+                        wf[passthrough_audio_id] = {
+                            "class_type": "VHS_LoadAudioUpload",
+                            "inputs": {
+                                "audio": audio_filename,
+                                "start_time": (
+                                    main_ref_skip_first + _actual_skip
+                                )
+                                / frame_rate,
+                                "duration": exact_length / frame_rate,
+                            },
+                        }
+                        vc_inputs["audio"] = [passthrough_audio_id, 0]
+                    else:
+                        vc_inputs.pop("audio", None)
+
+                    wf.pop(str(unique_id), None)
+                    wf.pop(unique_id, None)
+                    wf = prune_prompt_to_outputs(wf, [vc_nid])
+                    log(
+                        f"  ⏭ 原片硬切空白分段：跳过 KSampler、VAE、SAM3，"
+                        f"直接输出源视频帧 {exact_length} 帧"
+                    )
+                    try:
+                        pid = queue_prompt(wf, client_id=_client_id)
+                        last_prompt_id = pid
+                        log(f"  prompt_id={pid[:8]}...")
+                        if not wait_for_prompt(pid):
+                            log(f"✗ 第{seg_num}段原片硬切输出失败，终止。")
+                            break
+                        passthrough_path, _ = get_output_video_info(
+                            pid,
+                            vc_nid,
+                            logger=log,
+                        )
+                        if not passthrough_path:
+                            log(
+                                f"✗ 第{seg_num}段原片硬切已执行，"
+                                "但未找到输出文件"
+                            )
+                            break
+                        segment_output_paths.append(passthrough_path)
+                        generated_segment_paths.append(passthrough_path)
+                        log(
+                            f"  ✓ 原视频临时切片完整路径: "
+                            f"{os.path.realpath(passthrough_path)}"
+                        )
+                        _cleanup_managed(
+                            consumed_transition_path,
+                            ("sqr_trans_",),
+                        )
+                        if consumed_latent_name:
+                            _cleanup_managed(
+                                os.path.join(
+                                    folder_paths.get_input_directory(),
+                                    consumed_latent_name,
+                                ),
+                                ("sqr_latent",),
+                            )
+                        last_video_path = None
+                        last_video_frames = None
+                        last_latent_name = None
+                        _all_done = seg_num == total_segs
+                        _persist_segment_checkpoint(seg_num, skip, limit)
+                        _, release_detail = release_segment_memory()
+                        log(f"  缓存收敛完成: {release_detail}")
+                        continue
+                    except Exception as exc:
+                        log(
+                            f"✗ 第{seg_num}段原片硬切提交失败: "
+                            f"{_sqr_format_exc(exc)}"
+                        )
+                        break
                 if startup_trim_frames > 0:
                     length_ok, length_note = _sqr_add_to_input_or_linked_value(
                         wf, ae_nid, "length", startup_trim_frames
@@ -1994,6 +2284,7 @@ class SegmentQueueRunner:
                             img_dst = os.path.join(input_dir, img_fname)
                             try:
                                 _shutil.copy2(src_real, img_dst)
+                                segment_temp_inputs.add(img_dst)
                             except Exception as e:
                                 log(f"  ! reference image copy failed: {e}")
                             return img_fname
@@ -2183,6 +2474,8 @@ class SegmentQueueRunner:
                     trim_len = visible_limit
                     log(f"  Director 精确裁切：Wan窗口{limit}帧 → 时间线{visible_limit}帧")
 
+                needs_transition_handoff = False
+                full_vc_id = None
                 if vc_nid and vc_nid in wf:
                     final_output_image_node = [final_image_node, 0]
                     if frame_interpolate_nid and frame_interpolate_nid in wf:
@@ -2190,9 +2483,9 @@ class SegmentQueueRunner:
                         final_output_image_node = [frame_interpolate_nid, 0]
                         log("  帧插值：先按源视频帧数裁切，再对完整分段插帧")
 
-                    # Keep the user's existing Video Combine node as the live
-                    # per-segment preview target. The hidden full/cut clones are
-                    # still used for transition handoff and reliable file lookup.
+                    # The configured Video Combine is the sole visible segment
+                    # encoder. A hidden full-frame encoder is added only when
+                    # the next segment really needs a transition handoff.
                     wf[vc_nid]["inputs"]["images"] = final_output_image_node
 
                     full_image_node = image_src
@@ -2210,26 +2503,9 @@ class SegmentQueueRunner:
                         full_image_node = [full_align_id, 0]
                         log(f"  Multi Ref startup fix: transition source aligned from frame {startup_trim_frames}, length={full_align_len}")
 
-                    full_vc_id = f"sqr_full_vc_{seg_num}"
-                    full_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
-                    full_inputs["images"] = full_image_node
-                    if frame_interpolate_nid:
-                        full_inputs["frame_rate"] = frame_rate
-                    full_inputs["save_output"] = True
-                    full_inputs["save_metadata"] = False
-
-                    cut_vc_id = f"sqr_cut_vc_{seg_num}"
-                    cut_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
-                    cut_inputs["images"]          = final_output_image_node
-                    cut_inputs["save_output"]     = True
-                    cut_inputs["save_metadata"]   = False
                     _main_prefix = wf[vc_nid]["inputs"].get("filename_prefix", "")
                     _slash = max(_main_prefix.rfind("/"), _main_prefix.rfind("\\"))
                     _subfolder_prefix = _main_prefix[:_slash+1] if _slash >= 0 else ""
-                    _full_file_prefix = f"sqr_full_{run_stamp}_seg{seg_num}_"
-                    full_inputs["filename_prefix"] = f"{_subfolder_prefix}{_full_file_prefix}"
-                    _cut_file_prefix = f"sqr_cut_{run_stamp}_seg{seg_num}_"
-                    cut_inputs["filename_prefix"] = f"{_subfolder_prefix}{_cut_file_prefix}"
 
                     if audio_filename:
                         cut_audio_id = f"sqr_cut_audio_{seg_num}"
@@ -2241,23 +2517,56 @@ class SegmentQueueRunner:
                                 "duration":   0,
                             }
                         }
-                        cut_inputs["audio"] = [cut_audio_id, 0]
                         wf[vc_nid]["inputs"]["audio"] = [cut_audio_id, 0]
                         log(f"  ✓ cut_vc音频: start={audio_skip_frames/frame_rate:.3f}s (={audio_skip_frames}帧)")
                     else:
-                        full_inputs.pop("audio", None)
-                        cut_inputs.pop("audio", None)
+                        wf[vc_nid]["inputs"].pop("audio", None)
 
-                    wf[full_vc_id] = {"class_type": "VHS_VideoCombine", "inputs": full_inputs}
-                    wf[cut_vc_id] = {"class_type": "VHS_VideoCombine", "inputs": cut_inputs}
-                    _cut_search_dir = os.path.join(folder_paths.get_output_directory(),
-                                                   _subfolder_prefix.rstrip("/\\")) \
-                                      if _subfolder_prefix else folder_paths.get_output_directory()
-                    sqr_cut_cleanup.append((_cut_search_dir, _cut_file_prefix))
-                    sqr_full_cleanup.append((_cut_search_dir, _full_file_prefix))
+                    needs_transition_handoff = bool(
+                        transition_enabled
+                        and not is_last_seg
+                        and transition_supported
+                    )
+                    if needs_transition_handoff:
+                        full_vc_id = f"sqr_full_vc_{seg_num}"
+                        full_inputs = copy.deepcopy(wf[vc_nid]["inputs"])
+                        full_inputs["images"] = full_image_node
+                        full_inputs.pop("audio", None)
+                        if frame_interpolate_nid:
+                            full_inputs["frame_rate"] = frame_rate
+                        full_inputs["save_output"] = True
+                        full_inputs["save_metadata"] = False
+                        _full_file_prefix = (
+                            f"sqr_full_{run_stamp}_seg{seg_num}_"
+                        )
+                        full_inputs["filename_prefix"] = (
+                            f"{_subfolder_prefix}{_full_file_prefix}"
+                        )
+                        wf[full_vc_id] = {
+                            "class_type": "VHS_VideoCombine",
+                            "inputs": full_inputs,
+                        }
+                        _full_search_dir = os.path.join(
+                            folder_paths.get_output_directory(),
+                            _subfolder_prefix.rstrip("/\\"),
+                        ) if _subfolder_prefix else (
+                            folder_paths.get_output_directory()
+                        )
+                        sqr_full_cleanup.append(
+                            (_full_search_dir, _full_file_prefix)
+                        )
+                    else:
+                        log(
+                            "  缓存收敛：当前分段无需后续过渡接力，"
+                            "不生成完整中间视频"
+                        )
 
                 latent_save_id = None
-                if latent_src_node and _supports_latent_transition:
+                if (
+                    latent_src_node
+                    and _supports_latent_transition
+                    and needs_transition_handoff
+                ):
                     latent_save_id = f"sqr_save_latent_{seg_num}"
                     wf[latent_save_id] = {
                         "class_type": "SaveLatent",
@@ -2306,6 +2615,16 @@ class SegmentQueueRunner:
                     guide_links = _sqr_rewire_image_output(
                         wf, [str(unique_id), 1], guide_output
                     )
+                    video_frame_links = _sqr_rewire_image_output(
+                        wf, [str(unique_id), 2], [node_id, 0]
+                    )
+                    reference_links = 0
+                    if ref_target_id and ref_target_id in wf:
+                        reference_links = _sqr_rewire_image_output(
+                            wf,
+                            [str(unique_id), 3],
+                            [ref_target_id, 0],
+                        )
                     if guide_links:
                         log(
                             f"  比例引导帧: {'已载入 ' + director_guide_path if director_guide_path else '未提取，使用空白图像'} "
@@ -2321,6 +2640,11 @@ class SegmentQueueRunner:
                         if director_color_config.get("enabled") and color_ref_path:
                             wf.pop(f"sqr_director_color_target_{seg_num}", None)
                             wf.pop(f"sqr_director_color_match_{seg_num}", None)
+                    if video_frame_links or reference_links:
+                        log(
+                            f"  独立分段输出: 视频帧 rewired={video_frame_links}, "
+                            f"参考图 rewired={reference_links}"
+                        )
                     if unique_id in wf:
                         del wf[unique_id]
 
@@ -2332,81 +2656,42 @@ class SegmentQueueRunner:
                 log(f"  → 提交中...")
                 try:
                     pid = queue_prompt(wf, client_id=_client_id)
+                    last_prompt_id = pid
                     log(f"  prompt_id={pid[:8]}...")
                     ok  = wait_for_prompt(pid)
                     if ok:
                         log(f"✓ 第{seg_num}段完成")
                         if is_last_seg:
                             _all_done = True
-                        if unique_id and not _is_remote:
-                            _lv_inputs = base_prompt.get(node_id, {}).get("inputs", {})
-                            _ref_video_params = {
-                                "video":             _lv_inputs.get("video", ""),
-                                "force_rate":        _lv_inputs.get("force_rate", 0),
-                                "frame_load_cap":    _lv_inputs.get("frame_load_cap", 0),
-                                "skip_first_frames": _lv_inputs.get("skip_first_frames", 0),
-                                "select_every_nth":  _lv_inputs.get("select_every_nth", 1),
-                            }
-                            _next_seg_idx = seg_num
-                            if _next_seg_idx < len(seg_list):
-                                _frame_offset_for_resume = _frame_offset + seg_list[_next_seg_idx][0]
-                            else:
-                                _frame_offset_for_resume = _frame_offset + (skip + limit)
-                            _trans_fname = f"sqr_trans_{run_stamp}_seg{seg_num}.mp4"
-                            write_checkpoint(unique_id, {
-                                "unique_id":              unique_id,
-                                "run_stamp":                 run_stamp,
-                                "completed_seg":          seg_num,
-                                "total_segs":             total_segs,
-                                "next_seg":               seg_num + 1,
-                                "transition_video":       _trans_fname,
-                                "transition_latent":      last_latent_name or "",
-                                "ref_images":             ref_images_list,
-                                "ref_image_groups":      ref_image_groups,
-                                "director_snapshot":      director_checkpoint_snapshot,
-                                "director_settings": {
-                                    "transition_enabled": transition_enabled,
-                                    "multi_ref_enabled": multi_ref_enabled,
-                                    "replacement_enabled": replacement_enabled,
-                                    "video_node_id": node_id,
-                                    "reference_node_id": ri_node_id,
-                                    "motion_node_id": ae_node_id,
-                                    "output_node_id": combine_nid,
-                                },
-                                "identity_groups":        [
-                                    _sqr_ref_identity_groups(group, max_refs=6)[0]
-                                    for group in ref_image_groups
-                                ],
-                                "segment_outputs":        list(segment_output_paths),
-                                "segments":               segments,
-                                "ref_video":              _ref_video_params.get("video", ""),
-                                "ref_video_params":       _ref_video_params,
-                                "timestamp":              time.strftime("%Y-%m-%d %H:%M:%S"),
-                                "base_frame_offset":      _frame_offset,
-                                "frame_offset_for_resume": _frame_offset_for_resume,
-                                "total_frames_used":      total_frames,
-                                "frame_rate_used":        frame_rate,
-                            })
                         _elapsed = time.time() - _t0
                         _frames_done = sum(lmt for _, lmt in segs_to_run[:i+1])
                         save_speed_record(_elapsed, _frames_done)
 
-                        cut_vc_id_done = f"sqr_cut_vc_{seg_num}"
                         if vc_nid:
-                            cut_vpath, _ = get_output_video_info(pid, cut_vc_id_done, logger=log)
-                            if not cut_vpath:
-                                cut_vpath, _ = get_output_video_info(pid, vc_nid, logger=log)
+                            cut_vpath, _ = get_output_video_info(
+                                pid,
+                                vc_nid,
+                                logger=log,
+                            )
                             if cut_vpath:
                                 segment_output_paths.append(cut_vpath)
-                                sqr_cut_paths.append(cut_vpath)
-                                log(f"  ✓ 裁切输出: {os.path.basename(cut_vpath)}")
+                                generated_segment_paths.append(cut_vpath)
+                                log(
+                                    f"  ✓ 分段输出: "
+                                    f"{os.path.realpath(cut_vpath)}"
+                                )
                             else:
-                                log(f"  ⚠ 未找到裁切输出视频")
+                                log(f"  ⚠ 未找到分段输出视频")
 
-                        full_vc_id_done = f"sqr_full_vc_{seg_num}"
-                        vpath, vframes = get_output_video_info(pid, full_vc_id_done, logger=log) if vc_nid else (None, None)
-                        if not vpath and vc_nid:
-                            vpath, vframes = get_output_video_info(pid, vc_nid, logger=log)
+                        vpath, vframes = (
+                            get_output_video_info(
+                                pid,
+                                full_vc_id,
+                                logger=log,
+                            )
+                            if full_vc_id
+                            else (None, None)
+                        )
                         if latent_save_id:
                             lpath = get_output_latent_info(pid, latent_save_id, logger=log)
                             lname = _sqr_copy_latent_into_input(lpath, unique_id=unique_id, seg_num=seg_num) if lpath else None
@@ -2416,7 +2701,14 @@ class SegmentQueueRunner:
                             else:
                                 last_latent_name = None
                                 log(f"  ⚠ latent接力保存失败，下一段将退回视频过渡")
-                        if not vpath:
+                            if lpath:
+                                _cleanup_managed(
+                                    lpath,
+                                    ("sqr_latent_",),
+                                )
+                        else:
+                            last_latent_name = None
+                        if needs_transition_handoff and not vpath:
                             log(f"  ⚠ 完整视频获取失败，下段过渡将跳过")
                         if vpath:
                             import shutil
@@ -2431,31 +2723,62 @@ class SegmentQueueRunner:
                             except Exception as e:
                                 log(f"  ✗ 复制失败: {e}")
                                 last_video_path = last_video_frames = None
+                            _cleanup_managed(vpath, ("sqr_full_",))
                         else:
-                            log(f"  ⚠ 未找到完整视频，下段过渡将跳过")
                             last_video_path = last_video_frames = None
 
-                        # Update the record after discovering the real files.
-                        # This makes final merging recoverable as well as the
-                        # transition hand-off to the next unfinished segment.
-                        if unique_id and not _is_remote:
-                            _checkpoint = read_checkpoint(unique_id) or {}
-                            _checkpoint["segment_outputs"] = list(segment_output_paths)
-                            _checkpoint["transition_latent"] = last_latent_name or ""
-                            if last_video_path:
-                                _checkpoint["transition_video"] = os.path.basename(last_video_path)
-                            write_checkpoint(unique_id, _checkpoint)
+                        _cleanup_managed(
+                            consumed_transition_path,
+                            ("sqr_trans_",),
+                            keep_paths=(last_video_path,),
+                        )
+                        if consumed_latent_name:
+                            _cleanup_managed(
+                                os.path.join(
+                                    folder_paths.get_input_directory(),
+                                    consumed_latent_name,
+                                ),
+                                ("sqr_latent",),
+                                keep_paths=(
+                                    os.path.join(
+                                        folder_paths.get_input_directory(),
+                                        last_latent_name,
+                                    )
+                                    if last_latent_name
+                                    else ""
+                                ,),
+                            )
+                        _persist_segment_checkpoint(seg_num, skip, limit)
+                        for temp_input in segment_temp_inputs:
+                            _cleanup_managed(
+                                temp_input,
+                                ("sqr_refrun_",),
+                            )
+                        wf.clear()
+                        _, release_detail = release_segment_memory()
+                        log(f"  缓存收敛完成: {release_detail}")
                     else:
                         log(f"✗ 第{seg_num}段出错，终止。")
+                        for temp_input in segment_temp_inputs:
+                            _cleanup_managed(
+                                temp_input,
+                                ("sqr_refrun_",),
+                            )
                         break
                 except Exception as e:
                     log(f"✗ 提交失败：{e}")
+                    for temp_input in segment_temp_inputs:
+                        _cleanup_managed(
+                            temp_input,
+                            ("sqr_refrun_",),
+                        )
                     break
 
             if pre_segment_paths:
                 log(f"续跑合并：前段 {len(pre_segment_paths)} 个 + 本次 {len(segment_output_paths)} 个")
                 segment_output_paths = pre_segment_paths + segment_output_paths
 
+            final_output_path = None
             if len(segment_output_paths) >= 2:
                 log(f"开始合并 {len(segment_output_paths)} 段视频...")
                 output_dir   = folder_paths.get_output_directory()
@@ -2479,31 +2802,67 @@ class SegmentQueueRunner:
                                target_fps=frame_rate if pre_segment_paths else None,
                                source_audio_path=source_audio_path,
                                total_frames=total_frames,
-                               source_fps=frame_rate):
+                               source_fps=frame_rate,
+                               logger=log):
+                    final_output_path = merged_path
                     log(f"✓ 合并完成: {_sub + merged_fname}")
                 else:
+                    _all_done = False
                     log(f"✗ 合并失败，请手动拼接各段视频")
             elif len(segment_output_paths) == 1:
+                final_output_path = segment_output_paths[0]
                 log(f"只有1段，无需合并")
+            else:
+                _all_done = False
+                log("✗ 没有可用于最终输出的视频片段")
 
-            for (_clean_dir, _clean_prefix) in sqr_cut_cleanup:
-                try:
-                    if not os.path.isdir(_clean_dir):
+            if final_output_path and audio_filename:
+                final_has_audio, final_audio_detail = probe_audio_stream(
+                    final_output_path
+                )
+                if final_has_audio is True:
+                    log(
+                        f"✓ 最终视频音轨复核通过 "
+                        f"({final_audio_detail})"
+                    )
+                elif final_has_audio is False:
+                    _all_done = False
+                    log(
+                        "✗ 最终视频音轨校验失败：成品没有音频流；"
+                        "任务不会标记为完成，checkpoint 已保留"
+                    )
+                else:
+                    _all_done = False
+                    log(
+                        f"✗ 最终视频音轨校验失败：无法可靠检测成品音轨 "
+                        f"({final_audio_detail})；checkpoint 已保留"
+                    )
+
+            if final_output_path:
+                _sqr_publish_video_preview(
+                    final_output_path,
+                    frame_rate,
+                    _client_id,
+                    vc_nid,
+                    last_prompt_id,
+                    logger=log,
+                )
+
+            if (
+                final_output_path
+                and _all_done
+                and len(segment_output_paths) >= 2
+            ):
+                for generated_path in generated_segment_paths:
+                    if os.path.realpath(generated_path) == os.path.realpath(
+                        final_output_path
+                    ):
                         continue
-                    for _f in os.listdir(_clean_dir):
-                        if not _f.startswith(_clean_prefix):
-                            continue
-                        _fpath = os.path.join(_clean_dir, _f)
-                        if _f.endswith(".mp4") and "-audio" in _f:
-                            continue
-                        if _f.endswith(".mp4") or _f.endswith(".png"):
-                            try:
-                                os.remove(_fpath)
-                                print(f"[SQR] 已清理临时文件: {_f}")
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                    _cleanup_managed(
+                        generated_path,
+                        (os.path.basename(generated_path),),
+                        keep_paths=(final_output_path,),
+                    )
 
             for (_clean_dir, _clean_prefix) in sqr_full_cleanup:
                 try:
@@ -2558,7 +2917,10 @@ class SegmentQueueRunner:
                 else:
                     print("[SQR] 任务中断，checkpoint 保留供续跑检测")
 
-            log("═══ 全部完成 ═══")
+            if _all_done:
+                log("═══ 全部完成 ═══")
+            else:
+                log("═══ 未完整结束：请根据上方错误处理后续跑 ═══")
 
         if unique_id:
             _old_ckpt = read_checkpoint(unique_id)
@@ -2585,8 +2947,13 @@ class SegmentQueueRunner:
 
 class WanAniDirector(SegmentQueueRunner):
     CATEGORY = "video/utils"
-    RETURN_TYPES = ("STRING", "IMAGE")
-    RETURN_NAMES = ("positive", "比例引导帧")
+    RETURN_TYPES = ("STRING", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = (
+        "positive",
+        "比例引导帧",
+        "当前分段视频帧",
+        "当前分段参考图",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -2601,7 +2968,12 @@ class WanAniDirector(SegmentQueueRunner):
         resolved = resolve_director_composed_prompts(director_data)
         guide_frame = load_first_director_guide_frame(director_data)
         super().run(*args, director_data=director_data, **kwargs)
-        return (resolved[0] if resolved else "", guide_frame)
+        return (
+            resolved[0] if resolved else "",
+            guide_frame,
+            guide_frame,
+            guide_frame,
+        )
 
 
 NODE_CLASS_MAPPINGS = {
