@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-wanani-sqr"
-version = "3.0.0"
+version = "3.1.0"
 description = "Segment queue runner with integrated WanAnimate and SCAIL2 transition nodes."
 authors = [{name = "FeiHou"}]
 license = "MIT"

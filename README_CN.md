@@ -2,6 +2,36 @@
 
 # [English](README.md) 
 
+## 2026-07-29 更新 — 音频、最终预览与队列等待优化
+
+### Summary
+统一 SQR 与 VideoHelperSuite 的 ffmpeg 来源，将最终合并视频回传到 Video Combine 实时预览，并在最终合并失败时保留恢复现场。
+
+### Description
+
+- 依次复用 `VHS_FORCE_FFMPEG_PATH`、已加载的 VideoHelperSuite ffmpeg、系统 ffmpeg 或 imageio-ffmpeg，不再要求 `ffmpeg` 必须位于系统 `PATH`。
+- 音轨检测不可用时保留源音频输入，避免把“无法检测”误判成“源视频静音”。
+- 最终音频重封装强制要求源音轨存在；音频失败会明确报错，不再静默生成无声文件。
+- `sqr_merged_*.mp4` 合并成功后回传到所绑定的 `VHS_VideoCombine` 节点，供 ComfyUI 当前页面直接预览。
+- 最终拼接或音频重封装失败时保留 checkpoint，不再错误显示为全部完成。
+- 最终成品写入后再次检测音轨；“音轨检测存疑”“写入失败”“成品校验失败”分别输出明确日志，任一异常都不会把任务标记为完成。
+- 分段完成状态轮询由 5 秒缩短为 1 秒，降低多分段任务之间的空等时间。
+- SCAIL-2 `batch_size` 被强制修正为 `1`、或超过 20 FPS 且未连接插帧节点时，日志会给出明确警告。
+- 新增「原片硬切」分段模式。该模式直接裁取当前源视频帧并跳过 KSampler、VAE 与 SAM3；原片临时切片会参与最终合并，日志同时显示完整文件路径。
+- `WAN ANI DIRECTOR` 新增「当前分段视频帧」和「当前分段参考图」输出。推荐将驱动 SAM3 连接前者、参考图 SAM3 连接后者，队列会在每段提交前绑定到该段真实输入。
+- 新增质量优先的模型微分段。Director 中的镜头段仍保留原提示词、参考图、Character Lock 和精确时间范围；超过 Wan 81 帧上下文的采样镜头会自动均衡拆成多个队列任务。开启连续过渡时，每个微分段以约 65 个可见帧为目标，使额外的 16 帧 SCAIL-2 接力仍控制在单个 81 帧模型上下文内。
+- 分段落盘改为按需生成：关闭连续过渡时不再额外编码完整过渡视频或保存 latent；开启时也只为确实存在下一段的分段保存接力数据。
+- 每段完成后清理已消费的过渡视频、旧 latent、临时参考图和隐藏完整视频，并释放 Python/CUDA 未使用缓存；最终合并成功后清理本次生成的分段中间视频。
+- LH Video Cutter 同样复用 VideoHelperSuite 的 ffmpeg 路径，改善 Windows 便携环境兼容性。
+
+更新后请重启 ComfyUI，并强制刷新浏览器页面。
+
+推荐工作流连接：
+
+1. `WAN ANI DIRECTOR.当前分段视频帧` → 驱动人物 `SAM3 Video Track.images`，并用于 SCAIL-2 的当前分段视频输入。
+2. `WAN ANI DIRECTOR.当前分段参考图` → 参考人物 `SAM3 Video Track.images`。
+3. 不再把固定的完整 `VHS Load Video` 或跨分段参考批次直接连接到上述 SAM3 输入。
+
 ## 2026-07-21 更新 — LH Image Editor 与跨环境队列回连
 
 ### Summary
@@ -175,4 +205,3 @@ git clone https://github.com/zere111ai/ComfyUI-WanAni-SQR.git
 
 ## 📄 许可证
 MIT License
-
